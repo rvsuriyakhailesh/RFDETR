@@ -10,6 +10,7 @@ import { validateZipFiles } from "@/lib/validation";
 import { ZIP_VERSION } from "@/lib/finalization";
 import { runTiling, type TilingProgress } from "@/lib/tiling-pipeline";
 import { DEFAULT_SMALL_BOX_THRESHOLD, DEFAULT_MIN_RETAINED_PERCENTAGE, sanitizeSmallBoxThreshold, sanitizeMinRetainedPercentage } from "@/lib/tiling-settings";
+import { DEFAULT_SLIVER_MIN_SIDE, DEFAULT_SLIVER_ASPECT_RATIO, sanitizeSliverValue } from "@/lib/tiling-settings";
 import {
   loadSession,
   saveSession,
@@ -194,9 +195,9 @@ export default function App() {
   }, []);
 
   const handleSplitConfirm = useCallback(
-    async (splitIndex: number, smallBoxThreshold: number, minRetainedPercentage: number) => {
+    async (splitIndex: number, smallBoxThreshold: number, minRetainedPercentage: number, sliverMinSide: number, sliverAspectRatio: number) => {
       if (state.mode !== "main" || !state.session) return;
-      const splitData = computeSplitData(state.session.pairs, splitIndex, smallBoxThreshold, minRetainedPercentage);
+      const splitData = computeSplitData(state.session.pairs, splitIndex, smallBoxThreshold, minRetainedPercentage, sliverMinSide, sliverAspectRatio);
       await saveSplit(splitData, {
         id: "current",
         stage: "tiling",
@@ -222,6 +223,8 @@ export default function App() {
         },
         splitData.smallBoxThreshold,
         splitData.minRetainedPercentage,
+        splitData.sliverMinSide,
+        splitData.sliverAspectRatio,
       );
 
       await saveTiled(tiledData, {
@@ -498,6 +501,8 @@ export default function App() {
             initialSplitIndex={split?.splitIndex ?? suggestedSplitIndex}
             initialSmallBoxThreshold={split ? sanitizeSmallBoxThreshold(split.smallBoxThreshold) : DEFAULT_SMALL_BOX_THRESHOLD}
             initialMinRetainedPercentage={sanitizeMinRetainedPercentage(split?.minRetainedPercentage ?? DEFAULT_MIN_RETAINED_PERCENTAGE)}
+            initialSliverMinSide={sanitizeSliverValue(split?.sliverMinSide ?? DEFAULT_SLIVER_MIN_SIDE)}
+            initialSliverAspectRatio={sanitizeSliverValue(split?.sliverAspectRatio ?? DEFAULT_SLIVER_ASPECT_RATIO)}
             onConfirm={handleSplitConfirm}
             onBack={handleBackFromSplit}
           />
@@ -582,9 +587,11 @@ export default function App() {
                 <div className="mb-4 text-sm text-slate-600">
                   <p>Small Box Area Threshold: {tiled.smallBoxThreshold ?? 0} px²</p>
                   <p>Minimum Retained Percentage: {tiled.minRetainedPercentage ?? 0}%</p>
+                  <p>Sliver Minimum Side: {tiled.sliverMinSide ?? 0} px; Sliver Aspect Ratio: {tiled.sliverAspectRatio ?? 0}</p>
                   <p>Removed by small-area filter: {tiled.smallBoxesRemoved.train + tiled.smallBoxesRemoved.valid} (Train: {tiled.smallBoxesRemoved.train}, Valid: {tiled.smallBoxesRemoved.valid})</p>
                   <p>Removed as clipped fragments: {(tiled.clippedFragmentsRemoved?.train ?? 0) + (tiled.clippedFragmentsRemoved?.valid ?? 0)} (Train: {tiled.clippedFragmentsRemoved?.train ?? 0}, Valid: {tiled.clippedFragmentsRemoved?.valid ?? 0})</p>
-                  <p>Total removed: {tiled.smallBoxesRemoved.train + tiled.smallBoxesRemoved.valid + (tiled.clippedFragmentsRemoved?.train ?? 0) + (tiled.clippedFragmentsRemoved?.valid ?? 0)}</p>
+                  <p>Removed by sliver filter: {(tiled.sliverBoxesRemoved?.train ?? 0) + (tiled.sliverBoxesRemoved?.valid ?? 0)} (Train: {tiled.sliverBoxesRemoved?.train ?? 0}, Valid: {tiled.sliverBoxesRemoved?.valid ?? 0})</p>
+                  <p>Total removed: {tiled.smallBoxesRemoved.train + tiled.smallBoxesRemoved.valid + (tiled.clippedFragmentsRemoved?.train ?? 0) + (tiled.clippedFragmentsRemoved?.valid ?? 0) + (tiled.sliverBoxesRemoved?.train ?? 0) + (tiled.sliverBoxesRemoved?.valid ?? 0)}</p>
                 </div>
               )}
               <div className="flex justify-center gap-4 mb-6">

@@ -11,13 +11,16 @@ import {
 } from "lucide-react";
 import type { ValidatedPair, SplitData } from "@/lib/types";
 import { DEFAULT_SMALL_BOX_THRESHOLD, DEFAULT_MIN_RETAINED_PERCENTAGE, sanitizeSmallBoxThreshold, sanitizeMinRetainedPercentage } from "@/lib/tiling-settings";
+import { DEFAULT_SLIVER_MIN_SIDE, DEFAULT_SLIVER_ASPECT_RATIO, sanitizeSliverValue } from "@/lib/tiling-settings";
 
 interface SplitPickerProps {
   pairs: ValidatedPair[];
   initialSplitIndex: number;
   initialSmallBoxThreshold?: number;
   initialMinRetainedPercentage?: number;
-  onConfirm: (splitIndex: number, smallBoxThreshold: number, minRetainedPercentage: number) => Promise<void>;
+  initialSliverMinSide?: number;
+  initialSliverAspectRatio?: number;
+  onConfirm: (splitIndex: number, smallBoxThreshold: number, minRetainedPercentage: number, sliverMinSide: number, sliverAspectRatio: number) => Promise<void>;
   onBack: () => void;
 }
 
@@ -36,6 +39,8 @@ export function SplitPicker({
   initialSplitIndex,
   initialSmallBoxThreshold = DEFAULT_SMALL_BOX_THRESHOLD,
   initialMinRetainedPercentage = DEFAULT_MIN_RETAINED_PERCENTAGE,
+  initialSliverMinSide = DEFAULT_SLIVER_MIN_SIDE,
+  initialSliverAspectRatio = DEFAULT_SLIVER_ASPECT_RATIO,
   onConfirm,
   onBack,
 }: SplitPickerProps) {
@@ -48,6 +53,8 @@ export function SplitPicker({
   const [splitIndex, setSplitIndex] = useState(initialSplitIndex);
   const [thresholdInput, setThresholdInput] = useState(String(sanitizeSmallBoxThreshold(initialSmallBoxThreshold)));
   const [retainedInput, setRetainedInput] = useState(String(sanitizeMinRetainedPercentage(initialMinRetainedPercentage)));
+  const [sliverSideInput, setSliverSideInput] = useState(String(sanitizeSliverValue(initialSliverMinSide)));
+  const [sliverRatioInput, setSliverRatioInput] = useState(String(sanitizeSliverValue(initialSliverAspectRatio)));
   const [imageUrls, setImageUrls] = useState<Map<string, string>>(new Map());
   const [search, setSearch] = useState("");
   const [showSearch, setShowSearch] = useState(false);
@@ -130,11 +137,15 @@ export function SplitPicker({
       setThresholdInput(String(threshold));
       const retained = sanitizeMinRetainedPercentage(retainedInput);
       setRetainedInput(String(retained));
-      await onConfirm(splitIndex, threshold, retained);
+      const side = sanitizeSliverValue(sliverSideInput);
+      const ratio = sanitizeSliverValue(sliverRatioInput);
+      setSliverSideInput(String(side));
+      setSliverRatioInput(String(ratio));
+      await onConfirm(splitIndex, threshold, retained, side, ratio);
     } finally {
       setIsConfirming(false);
     }
-  }, [splitIndex, onConfirm, thresholdInput, retainedInput]);
+  }, [splitIndex, onConfirm, thresholdInput, retainedInput, sliverSideInput, sliverRatioInput]);
 
   const trainCount = splitIndex + 1;
   const validCount = sorted.length - trainCount;
@@ -201,6 +212,32 @@ export function SplitPicker({
             Set to 0% to disable.
           </p>
         </div>
+      </div>
+
+      <div className="mb-4 rounded-xl border border-slate-200 bg-white p-4">
+        <h3 className="font-semibold text-slate-800">Remove Narrow / Sliver Boxes</h3>
+        <div className="mt-2 flex flex-wrap items-center gap-4">
+          <div>
+            <label htmlFor="sliver-min-side" className="block text-sm text-slate-600">Sliver Minimum Side</label>
+            <input id="sliver-min-side" type="number" min={0} step="any" value={sliverSideInput} disabled={isConfirming}
+              onChange={(event) => setSliverSideInput(event.target.value)}
+              onBlur={() => setSliverSideInput(String(sanitizeSliverValue(sliverSideInput)))}
+              aria-describedby="sliver-help" className="mt-1 w-28 rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+            <span className="ml-2 text-sm text-slate-600">px</span>
+          </div>
+          <div>
+            <label htmlFor="sliver-aspect-ratio" className="block text-sm text-slate-600">Sliver Aspect Ratio</label>
+            <input id="sliver-aspect-ratio" type="number" min={0} step="any" value={sliverRatioInput} disabled={isConfirming}
+              onChange={(event) => setSliverRatioInput(event.target.value)}
+              onBlur={() => setSliverRatioInput(String(sanitizeSliverValue(sliverRatioInput)))}
+              aria-describedby="sliver-help" className="mt-1 w-28 rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+          </div>
+        </div>
+        <p id="sliver-help" className="mt-2 text-sm text-slate-500">
+          Removes extremely narrow fragments created during image splitting. A box is removed only when it was clipped by the tile boundary,
+          its smallest side is below the configured pixel value, and its aspect ratio is above the configured ratio.
+          Set either value to 0 to disable this filter.
+        </p>
       </div>
 
       <div className="flex gap-4 mb-4">
@@ -389,6 +426,8 @@ export function computeSplitData(
   splitIndex: number,
   smallBoxThreshold = 0,
   minRetainedPercentage = 0,
+  sliverMinSide = 0,
+  sliverAspectRatio = 0,
 ): SplitData {
   const sorted = [...pairs].sort((a, b) =>
     a.image.name.localeCompare(b.image.name),
@@ -405,6 +444,8 @@ export function computeSplitData(
   return {
     smallBoxThreshold: sanitizeSmallBoxThreshold(smallBoxThreshold),
     minRetainedPercentage: sanitizeMinRetainedPercentage(minRetainedPercentage),
+    sliverMinSide: sanitizeSliverValue(sliverMinSide),
+    sliverAspectRatio: sanitizeSliverValue(sliverAspectRatio),
     splitIndex,
     trainImages: trainPairs.map((p) => toSplitFile(p, true)),
     trainLabels: trainPairs.map((p) => toSplitFile(p, false)),

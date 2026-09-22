@@ -51,6 +51,8 @@ export interface SplitFile {
 }
 
 export interface SplitData {
+  sliverMinSide?: number;
+  sliverAspectRatio?: number;
   /** Missing on legacy sessions: filtering was disabled. */
   smallBoxThreshold?: number;
   minRetainedPercentage?: number;
@@ -68,6 +70,9 @@ export interface TiledFile {
 }
 
 export interface TiledData {
+  sliverMinSide?: number;
+  sliverAspectRatio?: number;
+  sliverBoxesRemoved?: { train: number; valid: number };
   smallBoxThreshold?: number;
   minRetainedPercentage?: number;
   clippedFragmentsRemoved?: { train: number; valid: number };

@@ -1,4 +1,14 @@
-import { sanitizeSmallBoxThreshold, sanitizeMinRetainedPercentage } from "./tiling-settings";
+import { sanitizeSmallBoxThreshold, sanitizeMinRetainedPercentage, sanitizeSliverValue } from "./tiling-settings";
+
+export interface SliverFilterOptions {
+  sliverMinSide?: number;
+  sliverAspectRatio?: number;
+  onRemoved?: () => void;
+}
+
+function strictlyBelow(value: number, threshold: number): boolean {
+  return threshold - value > Number.EPSILON * Math.max(1, Math.abs(value), Math.abs(threshold)) * 16;
+}
 
 export interface YoloLine {
   cls: number;
@@ -71,6 +81,7 @@ export function recomputeAnnotationForTile(
   onSmallBoxRemoved?: () => void,
   minRetainedPercentage = 0,
   onClippedFragmentRemoved?: () => void,
+  sliver: SliverFilterOptions = {},
 ): RecomputedLine | null {
   const boxLeft = line.xCenter * IMAGE_WIDTH - (line.width * IMAGE_WIDTH) / 2;
   const boxRight = line.xCenter * IMAGE_WIDTH + (line.width * IMAGE_WIDTH) / 2;
@@ -96,8 +107,12 @@ export function recomputeAnnotationForTile(
     return null;
   }
 
-  const wasClipped = clipLeft !== boxLeft || clipRight !== boxRight ||
-    clipTop !== boxTop || clipBottom !== boxBottom;
+  const coordinateEpsilon = Number.EPSILON * Math.max(IMAGE_WIDTH, IMAGE_HEIGHT,
+    Math.abs(boxLeft), Math.abs(boxRight), Math.abs(boxTop), Math.abs(boxBottom)) * 16;
+  const wasClipped = Math.abs(clipLeft - boxLeft) > coordinateEpsilon ||
+    Math.abs(clipRight - boxRight) > coordinateEpsilon ||
+    Math.abs(clipTop - boxTop) > coordinateEpsilon ||
+    Math.abs(clipBottom - boxBottom) > coordinateEpsilon;
   const retainedThreshold = sanitizeMinRetainedPercentage(minRetainedPercentage);
   if (wasClipped && retainedThreshold > 0) {
     const retainedPercentage = area / originalArea * 100;
@@ -112,6 +127,16 @@ export function recomputeAnnotationForTile(
   const newWidth = clipRight - clipLeft;
   const newYCenter = (clipTop + clipBottom) / 2;
   const newHeight = clipBottom - clipTop;
+
+  const minSide = Math.min(newWidth, newHeight);
+  const aspectRatio = Math.max(newWidth, newHeight) / minSide;
+  const sliverMinSide = sanitizeSliverValue(sliver.sliverMinSide);
+  const sliverAspectRatio = sanitizeSliverValue(sliver.sliverAspectRatio);
+  if (wasClipped && sliverMinSide > 0 && sliverAspectRatio > 0 &&
+      strictlyBelow(minSide, sliverMinSide) && strictlyBelow(sliverAspectRatio, aspectRatio)) {
+    sliver.onRemoved?.();
+    return null;
+  }
 
   return {
     cls: line.cls,
@@ -129,10 +154,11 @@ export function recomputeAnnotationsForTile(
   onSmallBoxRemoved?: () => void,
   minRetainedPercentage = 0,
   onClippedFragmentRemoved?: () => void,
+  sliver: SliverFilterOptions = {},
 ): RecomputedLine[] {
   const result: RecomputedLine[] = [];
   for (const line of lines) {
-    const recomputed = recomputeAnnotationForTile(line, tile, smallBoxThreshold, onSmallBoxRemoved, minRetainedPercentage, onClippedFragmentRemoved);
+    const recomputed = recomputeAnnotationForTile(line, tile, smallBoxThreshold, onSmallBoxRemoved, minRetainedPercentage, onClippedFragmentRemoved, sliver);
     if (recomputed) result.push(recomputed);
   }
   return result;
@@ -145,9 +171,10 @@ export function recomputeAnnotationTextForTile(
   onSmallBoxRemoved?: () => void,
   minRetainedPercentage = 0,
   onClippedFragmentRemoved?: () => void,
+  sliver: SliverFilterOptions = {},
 ): string {
   const lines = parseYoloText(text);
-  const recomputed = recomputeAnnotationsForTile(lines, tile, smallBoxThreshold, onSmallBoxRemoved, minRetainedPercentage, onClippedFragmentRemoved);
+  const recomputed = recomputeAnnotationsForTile(lines, tile, smallBoxThreshold, onSmallBoxRemoved, minRetainedPercentage, onClippedFragmentRemoved, sliver);
   return recomputed.map(formatYoloLine).join("\n");
 }
 

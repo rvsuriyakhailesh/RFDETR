@@ -1,11 +1,12 @@
 import type { SplitFile, TiledData, TiledFile } from "./types";
-import { sanitizeSmallBoxThreshold, sanitizeMinRetainedPercentage } from "./tiling-settings";
+import { sanitizeSmallBoxThreshold, sanitizeMinRetainedPercentage, sanitizeSliverValue } from "./tiling-settings";
 import {
   TILES,
   TILE_SUFFIXES,
   tileImageBlob,
   recomputeAnnotationTextForTile,
   type TileRange,
+  type SliverFilterOptions,
 } from "./tiling";
 
 export interface TilingProgress {
@@ -29,6 +30,7 @@ async function tileOneImage(
   onSmallBoxRemoved?: () => void,
   minRetainedPercentage = 0,
   onClippedFragmentRemoved?: () => void,
+  sliver: SliverFilterOptions = {},
 ): Promise<{ images: TiledFile[]; labels: TiledFile[] }> {
   const images: TiledFile[] = [];
   const labels: TiledFile[] = [];
@@ -46,7 +48,7 @@ async function tileOneImage(
     const tileBlob = await tileImageBlob(imageFile.blob, tile);
     images.push({ name: `${baseName}${suffix}.jpg`, blob: tileBlob });
 
-    const recomputedText = recomputeAnnotationTextForTile(labelText, tile, smallBoxThreshold, onSmallBoxRemoved, minRetainedPercentage, onClippedFragmentRemoved);
+    const recomputedText = recomputeAnnotationTextForTile(labelText, tile, smallBoxThreshold, onSmallBoxRemoved, minRetainedPercentage, onClippedFragmentRemoved, sliver);
     labels.push({
       name: `${baseName}${suffix}.txt`,
       blob: new Blob([recomputedText], { type: "text/plain" }),
@@ -64,11 +66,15 @@ export async function runTiling(
   onProgress?: (p: TilingProgress) => void,
   smallBoxThreshold = 0,
   minRetainedPercentage = 0,
+  sliverMinSide = 0,
+  sliverAspectRatio = 0,
 ): Promise<TiledData> {
   const threshold = sanitizeSmallBoxThreshold(smallBoxThreshold);
   const smallBoxesRemoved = { train: 0, valid: 0 };
   const retainedThreshold = sanitizeMinRetainedPercentage(minRetainedPercentage);
   const clippedFragmentsRemoved = { train: 0, valid: 0 };
+  const sliverSettings = { sliverMinSide: sanitizeSliverValue(sliverMinSide), sliverAspectRatio: sanitizeSliverValue(sliverAspectRatio) };
+  const sliverBoxesRemoved = { train: 0, valid: 0 };
   const totalImages = trainImages.length + validImages.length;
   let current = 0;
 
@@ -89,6 +95,7 @@ export async function runTiling(
       () => { smallBoxesRemoved.train++; },
       retainedThreshold,
       () => { clippedFragmentsRemoved.train++; },
+      { ...sliverSettings, onRemoved: () => { sliverBoxesRemoved.train++; } },
     );
     trainTiledImages.push(...result.images);
     trainTiledLabels.push(...result.labels);
@@ -107,6 +114,7 @@ export async function runTiling(
       () => { smallBoxesRemoved.valid++; },
       retainedThreshold,
       () => { clippedFragmentsRemoved.valid++; },
+      { ...sliverSettings, onRemoved: () => { sliverBoxesRemoved.valid++; } },
     );
     validTiledImages.push(...result.images);
     validTiledLabels.push(...result.labels);
@@ -114,6 +122,8 @@ export async function runTiling(
   }
 
   return {
+    ...sliverSettings,
+    sliverBoxesRemoved,
     smallBoxThreshold: threshold,
     smallBoxesRemoved,
     minRetainedPercentage: retainedThreshold,
