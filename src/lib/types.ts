@@ -53,6 +53,7 @@ export interface SplitFile {
 export interface SplitData {
   /** Missing on legacy sessions: filtering was disabled. */
   smallBoxThreshold?: number;
+  minRetainedPercentage?: number;
   splitIndex: number;
   trainImages: SplitFile[];
   trainLabels: SplitFile[];
@@ -68,6 +69,8 @@ export interface TiledFile {
 
 export interface TiledData {
   smallBoxThreshold?: number;
+  minRetainedPercentage?: number;
+  clippedFragmentsRemoved?: { train: number; valid: number };
   smallBoxesRemoved?: { train: number; valid: number };
   trainImages: TiledFile[];
   trainLabels: TiledFile[];

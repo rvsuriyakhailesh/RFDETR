@@ -9,7 +9,7 @@ import { FinalizationSummary, FinalizedDownload } from "@/components/Finalizatio
 import { validateZipFiles } from "@/lib/validation";
 import { ZIP_VERSION } from "@/lib/finalization";
 import { runTiling, type TilingProgress } from "@/lib/tiling-pipeline";
-import { DEFAULT_SMALL_BOX_THRESHOLD, sanitizeSmallBoxThreshold } from "@/lib/tiling-settings";
+import { DEFAULT_SMALL_BOX_THRESHOLD, DEFAULT_MIN_RETAINED_PERCENTAGE, sanitizeSmallBoxThreshold, sanitizeMinRetainedPercentage } from "@/lib/tiling-settings";
 import {
   loadSession,
   saveSession,
@@ -194,9 +194,9 @@ export default function App() {
   }, []);
 
   const handleSplitConfirm = useCallback(
-    async (splitIndex: number, smallBoxThreshold: number) => {
+    async (splitIndex: number, smallBoxThreshold: number, minRetainedPercentage: number) => {
       if (state.mode !== "main" || !state.session) return;
-      const splitData = computeSplitData(state.session.pairs, splitIndex, smallBoxThreshold);
+      const splitData = computeSplitData(state.session.pairs, splitIndex, smallBoxThreshold, minRetainedPercentage);
       await saveSplit(splitData, {
         id: "current",
         stage: "tiling",
@@ -221,6 +221,7 @@ export default function App() {
           );
         },
         splitData.smallBoxThreshold,
+        splitData.minRetainedPercentage,
       );
 
       await saveTiled(tiledData, {
@@ -496,6 +497,7 @@ export default function App() {
             pairs={session.pairs}
             initialSplitIndex={split?.splitIndex ?? suggestedSplitIndex}
             initialSmallBoxThreshold={split ? sanitizeSmallBoxThreshold(split.smallBoxThreshold) : DEFAULT_SMALL_BOX_THRESHOLD}
+            initialMinRetainedPercentage={sanitizeMinRetainedPercentage(split?.minRetainedPercentage ?? DEFAULT_MIN_RETAINED_PERCENTAGE)}
             onConfirm={handleSplitConfirm}
             onBack={handleBackFromSplit}
           />
@@ -578,9 +580,11 @@ export default function App() {
               </h2>
               {tiled.smallBoxesRemoved && (
                 <div className="mb-4 text-sm text-slate-600">
-                  <p>Small Box Threshold: {tiled.smallBoxThreshold ?? 0} px²</p>
-                  <p>Small boxes removed — Train: {tiled.smallBoxesRemoved.train}, Valid: {tiled.smallBoxesRemoved.valid}</p>
-                  <p>Total removed: {tiled.smallBoxesRemoved.train + tiled.smallBoxesRemoved.valid}</p>
+                  <p>Small Box Area Threshold: {tiled.smallBoxThreshold ?? 0} px²</p>
+                  <p>Minimum Retained Percentage: {tiled.minRetainedPercentage ?? 0}%</p>
+                  <p>Removed by small-area filter: {tiled.smallBoxesRemoved.train + tiled.smallBoxesRemoved.valid} (Train: {tiled.smallBoxesRemoved.train}, Valid: {tiled.smallBoxesRemoved.valid})</p>
+                  <p>Removed as clipped fragments: {(tiled.clippedFragmentsRemoved?.train ?? 0) + (tiled.clippedFragmentsRemoved?.valid ?? 0)} (Train: {tiled.clippedFragmentsRemoved?.train ?? 0}, Valid: {tiled.clippedFragmentsRemoved?.valid ?? 0})</p>
+                  <p>Total removed: {tiled.smallBoxesRemoved.train + tiled.smallBoxesRemoved.valid + (tiled.clippedFragmentsRemoved?.train ?? 0) + (tiled.clippedFragmentsRemoved?.valid ?? 0)}</p>
                 </div>
               )}
               <div className="flex justify-center gap-4 mb-6">

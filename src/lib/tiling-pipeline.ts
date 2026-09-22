@@ -1,5 +1,5 @@
 import type { SplitFile, TiledData, TiledFile } from "./types";
-import { sanitizeSmallBoxThreshold } from "./tiling-settings";
+import { sanitizeSmallBoxThreshold, sanitizeMinRetainedPercentage } from "./tiling-settings";
 import {
   TILES,
   TILE_SUFFIXES,
@@ -27,6 +27,8 @@ async function tileOneImage(
   total?: number,
   smallBoxThreshold = 0,
   onSmallBoxRemoved?: () => void,
+  minRetainedPercentage = 0,
+  onClippedFragmentRemoved?: () => void,
 ): Promise<{ images: TiledFile[]; labels: TiledFile[] }> {
   const images: TiledFile[] = [];
   const labels: TiledFile[] = [];
@@ -44,7 +46,7 @@ async function tileOneImage(
     const tileBlob = await tileImageBlob(imageFile.blob, tile);
     images.push({ name: `${baseName}${suffix}.jpg`, blob: tileBlob });
 
-    const recomputedText = recomputeAnnotationTextForTile(labelText, tile, smallBoxThreshold, onSmallBoxRemoved);
+    const recomputedText = recomputeAnnotationTextForTile(labelText, tile, smallBoxThreshold, onSmallBoxRemoved, minRetainedPercentage, onClippedFragmentRemoved);
     labels.push({
       name: `${baseName}${suffix}.txt`,
       blob: new Blob([recomputedText], { type: "text/plain" }),
@@ -61,9 +63,12 @@ export async function runTiling(
   validLabels: SplitFile[],
   onProgress?: (p: TilingProgress) => void,
   smallBoxThreshold = 0,
+  minRetainedPercentage = 0,
 ): Promise<TiledData> {
   const threshold = sanitizeSmallBoxThreshold(smallBoxThreshold);
   const smallBoxesRemoved = { train: 0, valid: 0 };
+  const retainedThreshold = sanitizeMinRetainedPercentage(minRetainedPercentage);
+  const clippedFragmentsRemoved = { train: 0, valid: 0 };
   const totalImages = trainImages.length + validImages.length;
   let current = 0;
 
@@ -82,6 +87,8 @@ export async function runTiling(
       totalImages,
       threshold,
       () => { smallBoxesRemoved.train++; },
+      retainedThreshold,
+      () => { clippedFragmentsRemoved.train++; },
     );
     trainTiledImages.push(...result.images);
     trainTiledLabels.push(...result.labels);
@@ -98,6 +105,8 @@ export async function runTiling(
       totalImages,
       threshold,
       () => { smallBoxesRemoved.valid++; },
+      retainedThreshold,
+      () => { clippedFragmentsRemoved.valid++; },
     );
     validTiledImages.push(...result.images);
     validTiledLabels.push(...result.labels);
@@ -107,6 +116,8 @@ export async function runTiling(
   return {
     smallBoxThreshold: threshold,
     smallBoxesRemoved,
+    minRetainedPercentage: retainedThreshold,
+    clippedFragmentsRemoved,
     trainImages: trainTiledImages,
     trainLabels: trainTiledLabels,
     validImages: validTiledImages,

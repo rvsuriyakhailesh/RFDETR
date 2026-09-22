@@ -1,4 +1,4 @@
-import { sanitizeSmallBoxThreshold } from "./tiling-settings";
+import { sanitizeSmallBoxThreshold, sanitizeMinRetainedPercentage } from "./tiling-settings";
 
 export interface YoloLine {
   cls: number;
@@ -69,11 +69,15 @@ export function recomputeAnnotationForTile(
   tile: TileRange,
   smallBoxThreshold = 0,
   onSmallBoxRemoved?: () => void,
+  minRetainedPercentage = 0,
+  onClippedFragmentRemoved?: () => void,
 ): RecomputedLine | null {
   const boxLeft = line.xCenter * IMAGE_WIDTH - (line.width * IMAGE_WIDTH) / 2;
   const boxRight = line.xCenter * IMAGE_WIDTH + (line.width * IMAGE_WIDTH) / 2;
   const boxTop = line.yCenter * IMAGE_HEIGHT - (line.height * IMAGE_HEIGHT) / 2;
   const boxBottom = line.yCenter * IMAGE_HEIGHT + (line.height * IMAGE_HEIGHT) / 2;
+  const originalArea = (boxRight - boxLeft) * (boxBottom - boxTop);
+  if (![boxLeft, boxRight, boxTop, boxBottom, originalArea].every(Number.isFinite) || originalArea <= 0) return null;
 
   const clipLeft = Math.max(boxLeft, tile.xMin);
   const clipRight = Math.min(boxRight, tile.xMax);
@@ -90,6 +94,18 @@ export function recomputeAnnotationForTile(
   if (threshold > 0 && area < threshold && threshold - area > roundoff) {
     onSmallBoxRemoved?.();
     return null;
+  }
+
+  const wasClipped = clipLeft !== boxLeft || clipRight !== boxRight ||
+    clipTop !== boxTop || clipBottom !== boxBottom;
+  const retainedThreshold = sanitizeMinRetainedPercentage(minRetainedPercentage);
+  if (wasClipped && retainedThreshold > 0) {
+    const retainedPercentage = area / originalArea * 100;
+    const percentageRoundoff = Number.EPSILON * Math.max(retainedPercentage, retainedThreshold) * 16;
+    if (retainedPercentage < retainedThreshold && retainedThreshold - retainedPercentage > percentageRoundoff) {
+      onClippedFragmentRemoved?.();
+      return null;
+    }
   }
 
   const newXCenter = (clipLeft + clipRight) / 2 - tile.xMin;
@@ -111,10 +127,12 @@ export function recomputeAnnotationsForTile(
   tile: TileRange,
   smallBoxThreshold = 0,
   onSmallBoxRemoved?: () => void,
+  minRetainedPercentage = 0,
+  onClippedFragmentRemoved?: () => void,
 ): RecomputedLine[] {
   const result: RecomputedLine[] = [];
   for (const line of lines) {
-    const recomputed = recomputeAnnotationForTile(line, tile, smallBoxThreshold, onSmallBoxRemoved);
+    const recomputed = recomputeAnnotationForTile(line, tile, smallBoxThreshold, onSmallBoxRemoved, minRetainedPercentage, onClippedFragmentRemoved);
     if (recomputed) result.push(recomputed);
   }
   return result;
@@ -125,9 +143,11 @@ export function recomputeAnnotationTextForTile(
   tile: TileRange,
   smallBoxThreshold = 0,
   onSmallBoxRemoved?: () => void,
+  minRetainedPercentage = 0,
+  onClippedFragmentRemoved?: () => void,
 ): string {
   const lines = parseYoloText(text);
-  const recomputed = recomputeAnnotationsForTile(lines, tile, smallBoxThreshold, onSmallBoxRemoved);
+  const recomputed = recomputeAnnotationsForTile(lines, tile, smallBoxThreshold, onSmallBoxRemoved, minRetainedPercentage, onClippedFragmentRemoved);
   return recomputed.map(formatYoloLine).join("\n");
 }
 

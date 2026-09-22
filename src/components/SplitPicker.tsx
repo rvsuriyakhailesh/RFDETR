@@ -10,13 +10,14 @@ import {
   X,
 } from "lucide-react";
 import type { ValidatedPair, SplitData } from "@/lib/types";
-import { DEFAULT_SMALL_BOX_THRESHOLD, sanitizeSmallBoxThreshold } from "@/lib/tiling-settings";
+import { DEFAULT_SMALL_BOX_THRESHOLD, DEFAULT_MIN_RETAINED_PERCENTAGE, sanitizeSmallBoxThreshold, sanitizeMinRetainedPercentage } from "@/lib/tiling-settings";
 
 interface SplitPickerProps {
   pairs: ValidatedPair[];
   initialSplitIndex: number;
   initialSmallBoxThreshold?: number;
-  onConfirm: (splitIndex: number, smallBoxThreshold: number) => Promise<void>;
+  initialMinRetainedPercentage?: number;
+  onConfirm: (splitIndex: number, smallBoxThreshold: number, minRetainedPercentage: number) => Promise<void>;
   onBack: () => void;
 }
 
@@ -34,6 +35,7 @@ export function SplitPicker({
   pairs,
   initialSplitIndex,
   initialSmallBoxThreshold = DEFAULT_SMALL_BOX_THRESHOLD,
+  initialMinRetainedPercentage = DEFAULT_MIN_RETAINED_PERCENTAGE,
   onConfirm,
   onBack,
 }: SplitPickerProps) {
@@ -45,6 +47,7 @@ export function SplitPicker({
   const [currentIndex, setCurrentIndex] = useState(initialSplitIndex);
   const [splitIndex, setSplitIndex] = useState(initialSplitIndex);
   const [thresholdInput, setThresholdInput] = useState(String(sanitizeSmallBoxThreshold(initialSmallBoxThreshold)));
+  const [retainedInput, setRetainedInput] = useState(String(sanitizeMinRetainedPercentage(initialMinRetainedPercentage)));
   const [imageUrls, setImageUrls] = useState<Map<string, string>>(new Map());
   const [search, setSearch] = useState("");
   const [showSearch, setShowSearch] = useState(false);
@@ -125,11 +128,13 @@ export function SplitPicker({
     try {
       const threshold = sanitizeSmallBoxThreshold(thresholdInput);
       setThresholdInput(String(threshold));
-      await onConfirm(splitIndex, threshold);
+      const retained = sanitizeMinRetainedPercentage(retainedInput);
+      setRetainedInput(String(retained));
+      await onConfirm(splitIndex, threshold, retained);
     } finally {
       setIsConfirming(false);
     }
-  }, [splitIndex, onConfirm, thresholdInput]);
+  }, [splitIndex, onConfirm, thresholdInput, retainedInput]);
 
   const trainCount = splitIndex + 1;
   const validCount = sorted.length - trainCount;
@@ -164,7 +169,7 @@ export function SplitPicker({
       </div>
 
       <div className="mb-4 rounded-xl border border-slate-200 bg-white p-4">
-        <h3 className="font-semibold text-slate-800">Small Box Threshold</h3>
+        <h3 className="font-semibold text-slate-800">Small Box Area Threshold</h3>
         <div className="mt-2 flex items-center gap-2 flex-wrap">
           <label htmlFor="small-box-threshold" className="text-sm text-slate-600">Minimum bounding-box area:</label>
           <input id="small-box-threshold" type="number" min={0} step={1}
@@ -179,6 +184,23 @@ export function SplitPicker({
           Boxes with an area smaller than this value after image splitting will be removed.
           Set to 0 to disable.
         </p>
+        <div className="mt-4">
+          <label htmlFor="min-retained-percentage" className="block font-semibold text-slate-800">Minimum Box Retained After Split</label>
+          <div className="mt-2 flex items-center gap-2">
+            <input id="min-retained-percentage" type="number" min={0} max={100} step="any"
+              value={retainedInput} disabled={isConfirming}
+              onChange={(event) => setRetainedInput(event.target.value)}
+              onBlur={() => setRetainedInput(String(sanitizeMinRetainedPercentage(retainedInput)))}
+              aria-describedby="min-retained-help"
+              className="w-28 rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+            <span className="text-sm text-slate-600">%</span>
+          </div>
+          <p id="min-retained-help" className="mt-2 text-sm text-slate-500">
+            Removes tiny fragments created when a bounding box is clipped by the tile boundary.
+            Example: 10% means a clipped fragment is removed if less than 10% of the original box remains.
+            Set to 0% to disable.
+          </p>
+        </div>
       </div>
 
       <div className="flex gap-4 mb-4">
@@ -366,6 +388,7 @@ export function computeSplitData(
   pairs: ValidatedPair[],
   splitIndex: number,
   smallBoxThreshold = 0,
+  minRetainedPercentage = 0,
 ): SplitData {
   const sorted = [...pairs].sort((a, b) =>
     a.image.name.localeCompare(b.image.name),
@@ -381,6 +404,7 @@ export function computeSplitData(
 
   return {
     smallBoxThreshold: sanitizeSmallBoxThreshold(smallBoxThreshold),
+    minRetainedPercentage: sanitizeMinRetainedPercentage(minRetainedPercentage),
     splitIndex,
     trainImages: trainPairs.map((p) => toSplitFile(p, true)),
     trainLabels: trainPairs.map((p) => toSplitFile(p, false)),
