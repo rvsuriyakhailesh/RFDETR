@@ -17,6 +17,7 @@ import {
   Eye,
   EyeOff,
   Pencil,
+  Slash,
   Copy,
   ClipboardPaste,
   Check,
@@ -24,14 +25,14 @@ import {
   CheckCircle2,
 } from "lucide-react";
 import type { TiledData, TiledFile } from "@/lib/types";
-import { imageNumberToIndex, moveSelectedBoxes } from "@/lib/editor";
+import { imageNumberToIndex, moveSelectedBoxes, pasteBoxesAtPosition, selectBoxesCrossedByLine, type Point } from "@/lib/editor";
 import { parseYoloText, formatYoloLine, type YoloLine, type RecomputedLine } from "@/lib/tiling";
 
 interface TileViewerProps {
   tiled: TiledData;
   objNamesText: string | null;
   onBack: () => void;
-  onSave: (split: "train" | "valid", labelName: string, text: string) => void;
+  onSave: (split: "train" | "valid", labelName: string, text: string) => Promise<void>;
   onFinalize: () => void;
 }
 
@@ -47,9 +48,10 @@ interface Transform {
   panY: number;
 }
 
-type Tool = "pan" | "draw";
+type Tool = "pan" | "draw" | "lineSelect";
+type Transition = { kind: "image"; index: number } | { kind: "back" } | { kind: "finalize" };
 
-const MIN_ZOOM = 1;
+const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 20;
 const RESET_TRANSFORM: Transform = { zoom: 1, panX: 0, panY: 0 };
 const HANDLE_PX = 10;
@@ -111,6 +113,14 @@ function labelsToText(labels: YoloLine[]): string {
     .join("\n");
 }
 
+function isEditableElement(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && (
+    target.isContentEditable ||
+    ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) ||
+    Boolean(target.closest("[contenteditable]"))
+  );
+}
+
 export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: TileViewerProps) {
   const entries = useMemo(() => buildEntries(tiled), [tiled]);
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -132,13 +142,18 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
   const [undoSnapshot, setUndoSnapshot] = useState<YoloLine[] | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isDrawing, setIsDrawing] = useState(false);
+  const [isLineDrawing, setIsLineDrawing] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
   const [isMovingBox, setIsMovingBox] = useState(false);
   const [drawRect, setDrawRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const [draftLine, setDraftLine] = useState<{ start: Point; end: Point } | null>(null);
+  const [completedLine, setCompletedLine] = useState<{ start: Point; end: Point } | null>(null);
   const [pendingDraw, setPendingDraw] = useState<YoloLine | null>(null);
   const [showUnsavedDialog, setShowUnsavedDialog] = useState(false);
-  const [pendingNavigate, setPendingNavigate] = useState<number | null>(null);
+  const [pendingTransition, setPendingTransition] = useState<Transition | null>(null);
   const [justSaved, setJustSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const fullscreenRef = useRef<HTMLDivElement>(null);
@@ -154,6 +169,8 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
     startNormX: number;
     startNormY: number;
   } | null>(null);
+  const lineStartRef = useRef<Point | null>(null);
+  const lastMousePositionRef = useRef<Point | null>(null);
   const resizeState = useRef<{
     handle: string;
     origLeft: number;
@@ -212,11 +229,11 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
       const visible = new Set<number>();
       selected.forEach((index) => {
         const box = labelsRef.current[index];
-        if (box && isClassVisible(box.cls)) visible.add(index);
+        if (showBoxes && box && isClassVisible(box.cls)) visible.add(index);
       });
       return visible.size === selected.size ? selected : visible;
     });
-  }, [isClassVisible]);
+  }, [isClassVisible, showBoxes]);
 
   const entry = entries[currentIndex];
   const hasUnsavedChanges = useMemo(
@@ -238,13 +255,20 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
       setLabels(parsed);
       setSavedLabels(parsed);
       setLabelsLoading(false);
-    }).catch(() => {
-      if (!cancelled) setNavigationError("Could not load annotations. Reopen the editor to retry.");
+    }).catch((error) => {
+      if (!cancelled) setNavigationError(error instanceof Error
+        ? `${entry.label.name}: ${error.message}`
+        : `Could not load ${entry.label.name}.`);
     });
     setSelectedBoxes(new Set());
     setUndoSnapshot(null);
     setPendingDraw(null);
     setDrawRect(null);
+    setDraftLine(null);
+    setCompletedLine(null);
+    lineStartRef.current = null;
+    lastMousePositionRef.current = null;
+    setIsLineDrawing(false);
     moveBoxState.current = null;
     cycleState.current = null;
     setIsMovingBox(false);
@@ -259,6 +283,7 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
     setImageNumber(String(currentIndex + 1));
     setNavigationError("");
     setJustSaved(false);
+    setSaveError("");
   }, [currentIndex]);
 
   useEffect(() => {
@@ -338,24 +363,34 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
     const handleMove = (e: MouseEvent) => {
       if (!drawState.current || !stageRef.current) return;
       const rect = stageRef.current.getBoundingClientRect();
-      const normX = (e.clientX - rect.left) / rect.width;
-      const normY = (e.clientY - rect.top) / rect.height;
+      const normX = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      const normY = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
       const x = Math.min(drawState.current.startNormX, normX);
       const y = Math.min(drawState.current.startNormY, normY);
       const w = Math.abs(normX - drawState.current.startNormX);
       const h = Math.abs(normY - drawState.current.startNormY);
       setDrawRect({ x, y, w, h });
     };
-    const handleUp = () => {
-      if (drawState.current && drawRect && drawRect.w > 0.005 && drawRect.h > 0.005) {
-        const newLine: YoloLine = {
-          cls: 0,
-          xCenter: drawRect.x + drawRect.w / 2,
-          yCenter: drawRect.y + drawRect.h / 2,
-          width: drawRect.w,
-          height: drawRect.h,
-        };
-        setPendingDraw(newLine);
+    const handleUp = (e: MouseEvent) => {
+      const start = drawState.current;
+      const rect = stageRef.current?.getBoundingClientRect();
+      if (start && rect) {
+        const normX = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+        const normY = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+        const x = Math.min(start.startNormX, normX);
+        const y = Math.min(start.startNormY, normY);
+        const w = Math.abs(normX - start.startNormX);
+        const h = Math.abs(normY - start.startNormY);
+        if (w > 0.005 && h > 0.005) {
+          const newLine: YoloLine = {
+            cls: 0,
+            xCenter: x + w / 2,
+            yCenter: y + h / 2,
+            width: w,
+            height: h,
+          };
+          setPendingDraw(newLine);
+        }
       }
       drawState.current = null;
       setDrawRect(null);
@@ -367,7 +402,50 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
       window.removeEventListener("mousemove", handleMove);
       window.removeEventListener("mouseup", handleUp);
     };
-  }, [isDrawing, drawRect]);
+  }, [isDrawing]);
+
+  useEffect(() => {
+    if (!isLineDrawing) return;
+    const pointInViewport = (e: MouseEvent): Point | null => {
+      const rect = viewportRef.current?.getBoundingClientRect();
+      return rect ? { x: e.clientX - rect.left, y: e.clientY - rect.top } : null;
+    };
+    const handleMove = (e: MouseEvent) => {
+      const start = lineStartRef.current;
+      const end = pointInViewport(e);
+      if (start && end) setDraftLine({ start, end });
+    };
+    const handleUp = (e: MouseEvent) => {
+      const start = lineStartRef.current;
+      const end = pointInViewport(e);
+      const stage = stageRef.current;
+      const viewport = viewportRef.current;
+      if (start && end && stage && viewport) {
+        const viewportRect = viewport.getBoundingClientRect();
+        const stageRect = stage.getBoundingClientRect();
+        const toNorm = (point: Point): Point => ({
+          x: (viewportRect.left + point.x - stageRect.left) / stageRect.width,
+          y: (viewportRect.top + point.y - stageRect.top) / stageRect.height,
+        });
+        const from = toNorm(start);
+        const to = toNorm(end);
+        const selection = showBoxes
+          ? selectBoxesCrossedByLine(labelsRef.current, from, to, isClassVisible)
+          : new Set<number>();
+        setSelectedBoxes(selection);
+        setCompletedLine({ start, end });
+      }
+      lineStartRef.current = null;
+      setDraftLine(null);
+      setIsLineDrawing(false);
+    };
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+    };
+  }, [isLineDrawing, isClassVisible, showBoxes]);
 
   useEffect(() => {
     if (!isResizing) return;
@@ -468,6 +546,7 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
     const stage = stageRef.current;
     if (!stage) return null;
     const rect = stage.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return null;
     return {
       x: (clientX - rect.left) / rect.width,
       y: (clientY - rect.top) / rect.height,
@@ -508,11 +587,22 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
 
   const handleViewportMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      if (e.button !== 0 || labelsLoading || pendingDraw || showUnsavedDialog) return;
+      if (e.button !== 0 || labelsLoading || pendingDraw || showUnsavedDialog || saving) return;
       e.preventDefault();
+      if (tool === "lineSelect") {
+        const rect = viewportRef.current?.getBoundingClientRect();
+        if (!rect) return;
+        const start = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+        lineStartRef.current = start;
+        setSelectedBoxes(new Set());
+        setCompletedLine(null);
+        setDraftLine({ start, end: start });
+        setIsLineDrawing(true);
+        return;
+      }
       if (tool === "draw") {
         const norm = screenToNorm(e.clientX, e.clientY);
-        if (!norm) return;
+        if (!norm || norm.x < 0 || norm.x > 1 || norm.y < 0 || norm.y > 1) return;
         drawState.current = { startNormX: norm.x, startNormY: norm.y };
         setDrawRect({ x: norm.x, y: norm.y, w: 0, h: 0 });
         setIsDrawing(true);
@@ -593,7 +683,7 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
       };
       setIsMovingBox(true);
     },
-    [tool, screenToNorm, hitTestBoxes, labelsLoading, pendingDraw, showUnsavedDialog, showBoxes],
+    [tool, screenToNorm, hitTestBoxes, labelsLoading, pendingDraw, showUnsavedDialog, showBoxes, saving],
   );
 
   const handleHandleMouseDown = useCallback(
@@ -616,12 +706,17 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
   );
 
   const deleteSelected = useCallback(() => {
-    if (selectedBoxes.size === 0) return;
+    if (selectedBoxes.size === 0 || saving || pendingDraw || showUnsavedDialog) return;
+    const toDelete = new Set([...selectedBoxes].filter((index) => {
+      const box = labelsRef.current[index];
+      return showBoxes && box && isClassVisible(box.cls);
+    }));
+    if (toDelete.size === 0) return;
     setUndoSnapshot(labelsRef.current);
-    const toDelete = new Set(selectedBoxes);
     setLabels((prev) => prev.filter((_, i) => !toDelete.has(i)));
     setSelectedBoxes(new Set());
-  }, [selectedBoxes]);
+    setCompletedLine(null);
+  }, [selectedBoxes, saving, pendingDraw, showUnsavedDialog, showBoxes, isClassVisible]);
 
   const copySelected = useCallback(() => {
     const copied = [...selectedBoxes]
@@ -633,16 +728,18 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
   }, [selectedBoxes]);
 
   const pasteCopied = useCallback(() => {
-    if (copiedBoxes.length === 0 || labelsLoading || pendingDraw || showUnsavedDialog) return;
-    const pasted = copiedBoxes.map((box) => ({
-      ...box,
-      xCenter: Math.min(1 - box.width / 2, box.xCenter + 0.02),
-      yCenter: Math.min(1 - box.height / 2, box.yCenter + 0.02),
-    }));
+    if (copiedBoxes.length === 0 || labelsLoading || pendingDraw || showUnsavedDialog || saving) return;
+    const mouse = lastMousePositionRef.current;
+    if (!mouse) return;
+    const position = screenToNorm(mouse.x, mouse.y);
+    if (!position || position.x < 0 || position.x > 1 || position.y < 0 || position.y > 1) return;
+    const pasted = pasteBoxesAtPosition(copiedBoxes, position.x, position.y);
+    if (!pasted) return;
     setUndoSnapshot(labelsRef.current);
     setLabels((prev) => [...prev, ...pasted]);
     setSelectedBoxes(new Set(pasted.map((_, index) => labelsRef.current.length + index)));
-  }, [copiedBoxes, labelsLoading, pendingDraw, showUnsavedDialog]);
+    setCompletedLine(null);
+  }, [copiedBoxes, labelsLoading, pendingDraw, showUnsavedDialog, saving, screenToNorm]);
 
   const undo = useCallback(() => {
     if (!undoSnapshot) return;
@@ -651,15 +748,26 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
     setSelectedBoxes(new Set());
   }, [undoSnapshot]);
 
-  const save = useCallback(() => {
-    if (!entry || labelsLoading || isMovingBox) return;
-    const text = labelsToText(labelsRef.current);
-    onSave(entry.split, entry.label.name, text);
-    setSavedLabels(labelsRef.current);
-    setUndoSnapshot(null);
-    setJustSaved(true);
-    setTimeout(() => setJustSaved(false), 2000);
-  }, [entry, onSave, labelsLoading, isMovingBox]);
+  const save = useCallback(async (): Promise<boolean> => {
+    if (!entry || labelsLoading || isMovingBox || isResizing || isDrawing || isLineDrawing || pendingDraw || saving) return false;
+    if (!hasUnsavedChanges) return true;
+    const snapshot = labelsRef.current;
+    setSaving(true);
+    setSaveError("");
+    try {
+      await onSave(entry.split, entry.label.name, labelsToText(snapshot));
+      setSavedLabels(snapshot);
+      setUndoSnapshot(null);
+      setJustSaved(true);
+      setTimeout(() => setJustSaved(false), 2000);
+      return true;
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "Could not save annotations. Try again.");
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  }, [entry, onSave, labelsLoading, isMovingBox, isResizing, isDrawing, isLineDrawing, pendingDraw, saving, hasUnsavedChanges]);
 
   const confirmDraw = useCallback(
     (cls: number) => {
@@ -702,43 +810,92 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
     }
   }, []);
 
-  const handleBack = useCallback(() => {
-    if (document.fullscreenElement) {
-      document.exitFullscreen().catch(() => {});
+  const finishTransition = useCallback((transition: Transition) => {
+    setShowUnsavedDialog(false);
+    setPendingTransition(null);
+    if (transition.kind === "image") {
+      setCurrentIndex(transition.index);
+    } else {
+      if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+      if (transition.kind === "back") onBack();
+      else onFinalize();
     }
-    onBack();
-  }, [onBack]);
+  }, [onBack, onFinalize]);
+
+  const requestTransition = useCallback((transition: Transition) => {
+    if (saving || isMovingBox || isResizing || isDrawing || isLineDrawing || pendingDraw || showUnsavedDialog) return;
+    if (hasUnsavedChanges) {
+      setPendingTransition(transition);
+      setShowUnsavedDialog(true);
+    } else finishTransition(transition);
+  }, [saving, isMovingBox, isResizing, isDrawing, isLineDrawing, pendingDraw, showUnsavedDialog, hasUnsavedChanges, finishTransition]);
+
+  const handleBack = useCallback(() => requestTransition({ kind: "back" }), [requestTransition]);
+  const handleFinalize = useCallback(() => requestTransition({ kind: "finalize" }), [requestTransition]);
 
   const navigateTo = useCallback(
     (index: number) => {
-      if (index < 0 || index >= entries.length || index === currentIndex || isMovingBox || isResizing || isDrawing || pendingDraw || showUnsavedDialog) return;
-      if (hasUnsavedChanges) {
-        setShowUnsavedDialog(true);
-        setPendingNavigate(index);
-      } else {
-        setCurrentIndex(index);
-      }
+      if (index < 0 || index >= entries.length || index === currentIndex) return;
+      requestTransition({ kind: "image", index });
     },
-    [entries.length, hasUnsavedChanges, currentIndex, isMovingBox, isResizing, isDrawing, pendingDraw, showUnsavedDialog],
+    [entries.length, currentIndex, requestTransition],
   );
+
+  useEffect(() => {
+    if (!hasUnsavedChanges && !saving) return;
+    const handler = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [hasUnsavedChanges, saving]);
 
   const goPrev = useCallback(() => navigateTo(currentIndex - 1), [currentIndex, navigateTo]);
   const goNext = useCallback(() => navigateTo(currentIndex + 1), [currentIndex, navigateTo]);
 
+  const toggleTool = useCallback((requested: "draw" | "lineSelect") => {
+    if (saving || pendingDraw || showUnsavedDialog || isResizing || isMovingBox) return;
+    drawState.current = null;
+    lineStartRef.current = null;
+    setIsDrawing(false);
+    setIsLineDrawing(false);
+    setDrawRect(null);
+    setDraftLine(null);
+    setCompletedLine(null);
+    setSelectedBoxes(new Set());
+    setTool((current) => current === requested ? "pan" : requested);
+  }, [saving, pendingDraw, showUnsavedDialog, isResizing, isMovingBox]);
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement;
-      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
+      if (e.repeat || isEditableElement(e.target) || saving || showUnsavedDialog) return;
       if (isResizing || isMovingBox) return;
+      const key = e.key.toLowerCase();
+      const command = e.ctrlKey || e.metaKey;
 
-      if ((e.ctrlKey || e.metaKey) && (e.key === "a" || e.key === "A")) {
+      if (command && key === "d") {
         e.preventDefault();
-        goPrev();
-      } else if (e.shiftKey && (e.key === "c" || e.key === "C")) {
+        deleteSelected();
+      } else if (command && key === "x") {
+        e.preventDefault();
+        toggleTool("lineSelect");
+      } else if (command && key === "c") {
         if (selectedBoxesRef.current.size === 0) return;
         e.preventDefault();
         copySelected();
-      } else if (e.shiftKey && (e.key === "v" || e.key === "V")) {
+      } else if (command && key === "v") {
+        if (copiedBoxes.length === 0) return;
+        e.preventDefault();
+        pasteCopied();
+      } else if (command && key === "a") {
+        e.preventDefault();
+        goPrev();
+      } else if (!command && e.shiftKey && key === "c") {
+        if (selectedBoxesRef.current.size === 0) return;
+        e.preventDefault();
+        copySelected();
+      } else if (!command && e.shiftKey && key === "v") {
         if (copiedBoxes.length === 0) return;
         e.preventDefault();
         pasteCopied();
@@ -751,34 +908,42 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
       } else if (e.key === "Delete" || e.key === "Backspace") {
         e.preventDefault();
         deleteSelected();
-      } else if (e.key === "v" || e.key === "V") {
+      } else if (!command && !e.altKey && key === "v") {
         e.preventDefault();
         setShowBoxes((v) => !v);
-      } else if ((e.key === "d" || e.key === "D") && !pendingDraw && !showUnsavedDialog) {
+      } else if (!command && !e.altKey && key === "d") {
         e.preventDefault();
-        setTool((prev) => (prev === "pan" ? "draw" : "pan"));
-      } else if (e.key === "f" || e.key === "F") {
+        toggleTool("draw");
+      } else if (!command && !e.altKey && key === "f") {
         e.preventDefault();
         toggleFullscreen();
-      } else if ((e.ctrlKey || e.metaKey) && e.key === "z") {
+      } else if (command && key === "z") {
         e.preventDefault();
         undo();
-      } else if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+      } else if (command && key === "s") {
         e.preventDefault();
-        save();
+        void save();
       } else if (e.key === "Escape") {
         if (pendingDraw) {
           setPendingDraw(null);
+        } else if (isLineDrawing) {
+          lineStartRef.current = null;
+          setDraftLine(null);
+          setIsLineDrawing(false);
+        } else if (isDrawing) {
+          drawState.current = null;
+          setDrawRect(null);
+          setIsDrawing(false);
         } else if (document.fullscreenElement) {
           document.exitFullscreen().catch(() => {});
         } else if (!isDrawing && !isDragging) {
-          onBack();
+          handleBack();
         }
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [goPrev, goNext, copySelected, pasteCopied, copiedBoxes.length, deleteSelected, undo, save, toggleFullscreen, onBack, pendingDraw, isDrawing, isDragging, showUnsavedDialog, isResizing, isMovingBox]);
+  }, [goPrev, goNext, copySelected, pasteCopied, copiedBoxes.length, deleteSelected, undo, save, toggleFullscreen, handleBack, pendingDraw, isDrawing, isLineDrawing, isDragging, showUnsavedDialog, isResizing, isMovingBox, saving, toggleTool]);
 
   if (entries.length === 0) {
     return (
@@ -797,7 +962,7 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
   }
 
   const viewportCursor =
-    tool === "draw"
+    tool === "draw" || tool === "lineSelect"
       ? "cursor-crosshair"
       : isDragging || isMovingBox
         ? "cursor-grabbing"
@@ -814,14 +979,15 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
             Click a box to select (smallest box wins on overlap, click again to
             cycle), Ctrl+click to select or deselect multiple boxes. Release
             Ctrl and drag a selected box to move the group. Drag handles to
-            resize, Del to delete, Shift+C/Shift+V to copy and paste selected boxes,
-            Ctrl+A for the previous image, D for draw mode, Ctrl+S to save. Scroll to zoom,
+            resize, Ctrl+D to delete, Ctrl+C/Ctrl+V to copy and paste at the mouse,
+            Ctrl+X for line selection, Ctrl+A for the previous image, D for draw mode, Ctrl+S to save. Scroll to zoom,
             drag to pan.
           </p>
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={onFinalize}
+            onClick={handleFinalize}
+            disabled={saving || isDrawing || isLineDrawing || isResizing || isMovingBox || Boolean(pendingDraw)}
             className="px-4 py-2 rounded-xl bg-green-600 text-white font-semibold text-sm hover:bg-green-700 transition-colors inline-flex items-center gap-2"
           >
             <CheckCircle2 className="w-4 h-4" />
@@ -829,6 +995,7 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
           </button>
           <button
             onClick={handleBack}
+            disabled={saving || isDrawing || isLineDrawing || isResizing || isMovingBox || Boolean(pendingDraw)}
             className="text-sm text-slate-500 hover:text-slate-700 flex items-center gap-1.5 px-3 py-2 rounded-lg hover:bg-slate-100 transition-colors"
           >
             <X className="w-4 h-4" />
@@ -905,15 +1072,30 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
                 No changes
               </span>
             )}
+            {saving && <span className="text-xs text-blue-600">Saving...</span>}
+            {saveError && <span role="alert" className="text-xs text-red-600 max-w-48 truncate" title={saveError}>{saveError}</span>}
           </div>
 
           <div className="flex items-center gap-1">
             <button
-              onClick={() => setTool(tool === "pan" ? "draw" : "pan")}
+              onClick={() => toggleTool("draw")}
+              disabled={saving || Boolean(pendingDraw) || showUnsavedDialog || isResizing || isMovingBox}
               className={`p-1.5 rounded-lg transition-colors cursor-pointer ${tool === "draw" ? "bg-blue-200 text-blue-700" : "text-slate-500 hover:bg-slate-100"}`}
-              title="Draw mode (D)"
+              title="Draw (D)"
+              aria-label="Draw (D)"
+              aria-pressed={tool === "draw"}
             >
               {tool === "draw" ? <Pencil className="w-4 h-4" /> : <MousePointerClick className="w-4 h-4" />}
+            </button>
+            <button
+              onClick={() => toggleTool("lineSelect")}
+              disabled={saving || Boolean(pendingDraw) || showUnsavedDialog || isResizing || isMovingBox}
+              className={`p-1.5 rounded-lg transition-colors cursor-pointer ${tool === "lineSelect" ? "bg-blue-200 text-blue-700" : "text-slate-500 hover:bg-slate-100"}`}
+              title="Line Select (Ctrl+X)"
+              aria-label="Line Select (Ctrl+X)"
+              aria-pressed={tool === "lineSelect"}
+            >
+              <Slash className="w-4 h-4" />
             </button>
 
             <div className="w-px h-5 bg-slate-200 mx-0.5" />
@@ -922,7 +1104,7 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
               onClick={deleteSelected}
               disabled={selectedBoxes.size === 0}
               className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-600 disabled:opacity-30 disabled:hover:bg-transparent cursor-pointer"
-              title="Delete selected (Del)"
+              title="Delete selected (Del or Ctrl+D)"
             >
               <Trash2 className="w-4 h-4" />
             </button>
@@ -930,7 +1112,7 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
               onClick={copySelected}
               disabled={selectedBoxes.size === 0}
               className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-600 disabled:opacity-30 disabled:hover:bg-transparent cursor-pointer"
-              title="Copy selected box(es) (Shift+C)"
+              title="Copy selected box(es) (Ctrl+C)"
             >
               <Copy className="w-4 h-4" />
             </button>
@@ -938,7 +1120,7 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
               onClick={pasteCopied}
               disabled={copiedBoxes.length === 0}
               className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-600 disabled:opacity-30 disabled:hover:bg-transparent cursor-pointer"
-              title="Paste copied box(es) (Shift+V)"
+              title="Paste copied box(es) at mouse (Ctrl+V)"
             >
               <ClipboardPaste className="w-4 h-4" />
             </button>
@@ -952,7 +1134,7 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
             </button>
             <button
               onClick={save}
-              disabled={!hasUnsavedChanges}
+              disabled={!hasUnsavedChanges || saving || labelsLoading || isMovingBox || isResizing || isDrawing || isLineDrawing || Boolean(pendingDraw)}
               className={`p-1.5 rounded-lg transition-colors cursor-pointer ${hasUnsavedChanges ? "bg-green-100 text-green-700 hover:bg-green-200" : "text-slate-400 opacity-50"}`}
               title="Save (Ctrl+S)"
             >
@@ -1057,6 +1239,8 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
         <div
           ref={viewportRef}
           onMouseDown={handleViewportMouseDown}
+          onMouseMove={(event) => { lastMousePositionRef.current = { x: event.clientX, y: event.clientY }; }}
+          onMouseLeave={() => { lastMousePositionRef.current = null; }}
           onDragStart={(e) => e.preventDefault()}
           className={`relative bg-slate-900 overflow-hidden flex items-center justify-center select-none ${viewportCursor} ${isFullscreen ? "flex-1" : "h-[65vh]"}`}
         >
@@ -1191,6 +1375,20 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
             <div className="text-slate-500 text-sm py-20">Loading image...</div>
           )}
 
+          {(draftLine || completedLine) && (
+            <svg className="absolute inset-0 z-30 w-full h-full pointer-events-none" aria-hidden="true">
+              <line
+                x1={(draftLine ?? completedLine)!.start.x}
+                y1={(draftLine ?? completedLine)!.start.y}
+                x2={(draftLine ?? completedLine)!.end.x}
+                y2={(draftLine ?? completedLine)!.end.y}
+                stroke="#facc15"
+                strokeWidth="2"
+                strokeDasharray="6 4"
+              />
+            </svg>
+          )}
+
           {isFullscreen && (
             <button
               onClick={handleExitFullscreen}
@@ -1265,7 +1463,7 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
         )}
 
         {/* Unsaved changes dialog */}
-        {showUnsavedDialog && pendingNavigate !== null && (
+        {showUnsavedDialog && pendingTransition && (
           <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/50">
             <div className="bg-white rounded-2xl shadow-xl p-6 max-w-sm w-full mx-4">
               <div className="flex items-start gap-3 mb-4">
@@ -1279,32 +1477,24 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
                   <p className="text-sm text-slate-500 mt-1">
                     You have unsaved annotation changes for{" "}
                     <span className="font-medium">{entry.image.name}</span>.
-                    Save before navigating, or discard the changes.
+                    Save before continuing, or discard the changes.
                   </p>
                 </div>
               </div>
               <div className="flex gap-2">
                 <button
-                  onClick={() => {
-                    save();
-                    setShowUnsavedDialog(false);
-                    if (pendingNavigate !== null) {
-                      setCurrentIndex(pendingNavigate);
-                      setPendingNavigate(null);
-                    }
+                  onClick={async () => {
+                    const transition = pendingTransition;
+                    if (await save()) finishTransition(transition);
                   }}
+                  disabled={saving}
                   className="flex-1 px-4 py-2 rounded-lg bg-green-600 text-white text-sm font-medium hover:bg-green-700 transition-colors cursor-pointer"
                 >
                   Save & continue
                 </button>
                 <button
-                  onClick={() => {
-                    setShowUnsavedDialog(false);
-                    if (pendingNavigate !== null) {
-                      setCurrentIndex(pendingNavigate);
-                      setPendingNavigate(null);
-                    }
-                  }}
+                  onClick={() => finishTransition(pendingTransition)}
+                  disabled={saving}
                   className="flex-1 px-4 py-2 rounded-lg bg-slate-100 text-slate-600 text-sm font-medium hover:bg-slate-200 transition-colors cursor-pointer"
                 >
                   Discard
@@ -1312,8 +1502,9 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
                 <button
                   onClick={() => {
                     setShowUnsavedDialog(false);
-                    setPendingNavigate(null);
+                    setPendingTransition(null);
                   }}
+                  disabled={saving}
                   className="px-4 py-2 rounded-lg text-slate-500 text-sm hover:bg-slate-100 transition-colors cursor-pointer"
                 >
                   Stay

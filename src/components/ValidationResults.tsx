@@ -57,6 +57,12 @@ const ISSUE_META: Record<
     color: "text-orange-600",
     bg: "bg-orange-50",
   },
+  "invalid-annotation": {
+    label: "Invalid Annotations",
+    icon: FileWarning,
+    color: "text-red-600",
+    bg: "bg-red-50",
+  },
   "zip-structure": {
     label: "Zip Structure Errors",
     icon: FolderX,
@@ -88,6 +94,7 @@ export function ValidationResults({
       i.type === "orphaned-image" ||
       i.type === "orphaned-annotation" ||
       i.type === "duplicate-filename" ||
+      i.type === "invalid-annotation" ||
       i.type === "resolution",
   );
 

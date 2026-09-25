@@ -5,9 +5,6 @@ import {
   formatYoloLine,
   TILE_0,
   TILE_1,
-  IMAGE_WIDTH,
-  IMAGE_HEIGHT,
-  TILE_SIZE,
   type YoloLine,
 } from "../src/lib/tiling";
 

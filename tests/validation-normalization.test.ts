@@ -32,7 +32,7 @@ async function uploadedZips(images: string[], annotations: string[]) {
   const labels = new JSZip();
   images.forEach(name => backup.file(`data/${name}`, `image bytes:${name}`));
   annotations.forEach((name, index) => labels.file(`obj_train_data/${name}`, `${index} 0.3 0.5 0.1 0.2`));
-  labels.file("obj.names", "seat\n");
+  labels.file("obj.names", "seat0\nseat1\nseat2\nseat3\n");
   // JSZip accepts byte buffers in Node; attach upload names for the File API.
   const file1 = Object.assign(await backup.generateAsync({ type: "uint8array" }), { name: "seats_backup.zip" }) as unknown as File;
   const file2 = Object.assign(await labels.generateAsync({ type: "uint8array" }), { name: "seats.zip" }) as unknown as File;
@@ -71,7 +71,7 @@ describe("normalization at the ZIP upload boundary", () => {
     expect(zip.file("RFDETR_seats/train/images/seats_001_1.jpg")).not.toBeNull();
     expect(zip.file("RFDETR_seats/valid/images/seats_100_2.jpg")).not.toBeNull();
     expect(await zip.file("RFDETR_seats/train/labels/seats_001_1.txt")!.async("string")).toBe(await label.blob.text());
-    expect(await zip.file("RFDETR_seats/RFDETR_seats_obj.names")!.async("string")).toBe("seat\n");
+    expect(await zip.file("RFDETR_seats/RFDETR_seats_obj.names")!.async("string")).toBe("seat0\nseat1\nseat2\nseat3\n");
   });
 
   it("keeps mixed datasets untouched", async () => {

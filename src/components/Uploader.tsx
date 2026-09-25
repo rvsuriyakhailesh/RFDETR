@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { UploadCloud, FileArchive, X, Loader2 } from "lucide-react";
+import { formatSize } from "@/lib/format-size";
 
 interface UploaderProps {
   onValidate: (file1: File, file2: File) => Promise<void>;
@@ -50,12 +51,6 @@ export function Uploader({ onValidate, isValidating }: UploaderProps) {
   const removeFile = useCallback((index: number) => {
     setFiles((prev) => prev.filter((_, i) => i !== index));
   }, []);
-
-  const formatSize = (bytes: number) => {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 / 1024)).toFixed(1)} MB`;
-  };
 
   return (
     <div className="w-full max-w-2xl mx-auto">

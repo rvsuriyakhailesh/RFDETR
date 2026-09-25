@@ -25,9 +25,9 @@ interface FinalizationSummaryProps {
   zipBaseName: string;
   oldFoldersDeleted: boolean;
   cachedZip: Blob | null;
-  onConfirm: (zipBlob: Blob) => void;
+  onConfirm: (zipBlob: Blob) => Promise<void>;
   onBackToEditor: () => void;
-  onDeleteOldFolders: () => void;
+  onDeleteOldFolders: () => Promise<void>;
 }
 
 const CLASS_COLORS = [
@@ -63,6 +63,8 @@ export function FinalizationSummary({
   const [building, setBuilding] = useState(false);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [actionError, setActionError] = useState("");
+  const [deleting, setDeleting] = useState(false);
 
   const classNames = useMemo(() => {
     if (!objNamesText) return [];
@@ -73,7 +75,13 @@ export function FinalizationSummary({
   const zipFileName = `RFDETR_${folderName}`;
 
   useEffect(() => {
-    computeFinalSummaryAsync(tiled, classNames).then(setSummary);
+    let cancelled = false;
+    computeFinalSummaryAsync(tiled, classNames).then((result) => {
+      if (!cancelled) setSummary(result);
+    }).catch((error) => {
+      if (!cancelled) setActionError(error instanceof Error ? error.message : "Could not review annotations.");
+    });
+    return () => { cancelled = true; };
   }, [tiled, classNames]);
 
   useEffect(() => {
@@ -85,7 +93,9 @@ export function FinalizationSummary({
   }, [zipBlob]);
 
   const handleBuildZip = async () => {
+    if (!summary) return;
     setBuilding(true);
+    setActionError("");
     setZipProgress({ current: 0, total: 0, fileName: "Starting..." });
     try {
       const blob = await buildFinalZip(
@@ -94,13 +104,27 @@ export function FinalizationSummary({
         folderName,
         (p) => setZipProgress(p),
       );
+      await onConfirm(blob);
       setZipBlob(blob);
-      onConfirm(blob);
-    } catch {
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Could not finalize the ZIP. Try again.");
       setZipProgress(null);
     } finally {
       setBuilding(false);
       setZipProgress(null);
+    }
+  };
+
+  const handleDeleteIntermediate = async () => {
+    setDeleting(true);
+    setActionError("");
+    try {
+      await onDeleteOldFolders();
+      setShowDeleteConfirm(false);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Could not delete intermediate data.");
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -214,15 +238,14 @@ export function FinalizationSummary({
                 Intermediate data cleanup
               </h3>
               <p className="text-sm text-slate-500 mt-1">
-                The <code className="text-xs bg-slate-100 px-1 py-0.5 rounded font-mono">train_old</code> and{" "}
-                <code className="text-xs bg-slate-100 px-1 py-0.5 rounded font-mono">valid_old</code> folders
-                contain only the intermediate full-resolution source images used for tiling. They are
-                not part of the final output and can be safely deleted to free up storage.
+                Remove stored source images and full-resolution train/valid split copies
+                from browser storage. Tiled images and any existing final ZIP remain available.
+                After cleanup, changing the train/valid split requires a new upload.
               </p>
               {oldFoldersDeleted ? (
                 <div className="mt-3 flex items-center gap-2 text-sm text-green-600 font-medium">
                   <CheckCircle2 className="w-4 h-4" />
-                  Intermediate folders deleted
+                  Intermediate data deleted
                 </div>
               ) : showDeleteConfirm ? (
                 <div className="mt-3 flex items-center gap-2">
@@ -230,16 +253,15 @@ export function FinalizationSummary({
                     Are you sure?
                   </span>
                   <button
-                    onClick={() => {
-                      onDeleteOldFolders();
-                      setShowDeleteConfirm(false);
-                    }}
+                    onClick={handleDeleteIntermediate}
+                    disabled={deleting || building}
                     className="px-3 py-1.5 rounded-lg bg-red-600 text-white text-xs font-medium hover:bg-red-700 transition-colors"
                   >
                     Yes, delete
                   </button>
                   <button
                     onClick={() => setShowDeleteConfirm(false)}
+                    disabled={deleting}
                     className="px-3 py-1.5 rounded-lg bg-slate-100 text-slate-600 text-xs font-medium hover:bg-slate-200 transition-colors"
                   >
                     Cancel
@@ -250,12 +272,14 @@ export function FinalizationSummary({
                   onClick={() => setShowDeleteConfirm(true)}
                   className="mt-3 px-4 py-2 rounded-lg bg-slate-100 text-slate-700 text-sm font-medium hover:bg-slate-200 transition-colors"
                 >
-                  Delete intermediate folders
+                  Delete intermediate data
                 </button>
               )}
             </div>
           </div>
         </div>
+
+        {actionError && <div role="alert" className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{actionError}</div>}
 
         {/* Zip build + download */}
         <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
@@ -327,6 +351,7 @@ export function FinalizationSummary({
               {!zipBlob && !building && (
                 <button
                   onClick={handleBuildZip}
+                  disabled={deleting || !summary}
                   className="mt-4 inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-slate-900 text-white font-semibold text-sm hover:bg-slate-800 transition-colors"
                 >
                   <FileArchive className="w-4 h-4" />

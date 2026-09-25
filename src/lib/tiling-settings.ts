@@ -1,7 +1,7 @@
 export const DEFAULT_SMALL_BOX_THRESHOLD = 0;
 export const DEFAULT_MIN_RETAINED_PERCENTAGE = 10;
-export const DEFAULT_SLIVER_MIN_SIDE = 40;
-export const DEFAULT_SLIVER_ASPECT_RATIO = 3;
+export const DEFAULT_SLIVER_MIN_SIDE = 25;
+export const DEFAULT_SLIVER_ASPECT_RATIO = 6;
 
 export function sanitizeSliverValue(value: unknown): number {
   if (typeof value !== "number" && typeof value !== "string") return 0;

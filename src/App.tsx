@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Layers, ArrowRight, CheckCircle2, Loader2, Download, RotateCcw } from "lucide-react";
+import { Layers, ArrowRight, CheckCircle2, Loader2, RotateCcw } from "lucide-react";
 import { Uploader } from "@/components/Uploader";
 import { ValidationResults } from "@/components/ValidationResults";
 import { ResumePrompt } from "@/components/ResumePrompt";
@@ -17,6 +17,8 @@ import {
   saveSplit,
   saveTiled,
   saveFinalization,
+  cleanupIntermediateData,
+  updateSessionStage,
   clearSession,
   requestPersistentStorage,
 } from "@/lib/db";
@@ -54,6 +56,7 @@ type AppState =
 export default function App() {
   const [state, setState] = useState<AppState>({ mode: "checking" });
   const [isValidating, setIsValidating] = useState(false);
+  const [actionError, setActionError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -65,7 +68,15 @@ export default function App() {
           const stage = record.meta.stage;
           if (stage === "finalized") {
             const fin = record.finalization;
-            const zipStale = !fin || fin.zipVersion !== ZIP_VERSION;
+            const zipStale = !fin || fin.zipVersion !== ZIP_VERSION || !record.finalZip;
+            if (zipStale) {
+              try {
+                await updateSessionStage("finalization-summary");
+              } catch (error) {
+                setActionError(error instanceof Error ? error.message : "Could not update the saved stage.");
+              }
+            }
+            if (cancelled) return;
             setState({
               mode: "main",
               stage: zipStale ? "finalization-summary" : "finalized",
@@ -81,12 +92,12 @@ export default function App() {
             setState({
               mode: "resume-prompt",
               updatedAt: record.meta.updatedAt,
-              pairCount: record.session.pairs.length,
-              hasSplit: record.split != null,
+              pairCount: record.session.totalImages,
+              hasSplit: record.split != null || record.tiled != null,
             });
           } else {
             const fin = record.finalization;
-            const zipStale = fin && fin.zipVersion !== ZIP_VERSION;
+            const zipStale = Boolean(fin && fin.zipVersion !== ZIP_VERSION);
             setState({
               mode: "main",
               stage,
@@ -161,23 +172,31 @@ export default function App() {
   }, []);
 
   const handleResume = useCallback(async () => {
-    const record = await loadSession();
-    if (record && record.session) {
-      const fin = record.finalization;
-      const zipStale = fin && fin.zipVersion !== ZIP_VERSION;
-      setState({
-        mode: "main",
-        stage: record.meta.stage === "tiling" ? "split-picker" : record.meta.stage,
-        issues: [],
-        session: record.session,
-        split: record.split ?? null,
-        tiled: record.tiled ?? null,
-        tilingProgress: null,
-        finalization: fin ?? null,
-        finalZip: zipStale ? null : record.finalZip ?? null,
-      });
-    } else {
-      setState({ mode: "main", stage: "upload", issues: [], session: null, split: null, tiled: null, tilingProgress: null, finalization: null, finalZip: null });
+    try {
+      const record = await loadSession();
+      if (record && record.session) {
+        const fin = record.finalization;
+        const zipStale = Boolean(fin && fin.zipVersion !== ZIP_VERSION) || (record.meta.stage === "finalized" && !record.finalZip);
+        const stage = record.meta.stage === "tiling" ? "split-picker"
+          : record.meta.stage === "finalizing" ? "finalization-summary"
+            : record.meta.stage === "finalized" && zipStale ? "finalization-summary" : record.meta.stage;
+        if (stage !== record.meta.stage) await updateSessionStage(stage);
+        setState({
+          mode: "main",
+          stage,
+          issues: [],
+          session: record.session,
+          split: record.split ?? null,
+          tiled: record.tiled ?? null,
+          tilingProgress: null,
+          finalization: fin ?? null,
+          finalZip: zipStale ? null : record.finalZip ?? null,
+        });
+      } else {
+        setState({ mode: "main", stage: "upload", issues: [], session: null, split: null, tiled: null, tilingProgress: null, finalization: null, finalZip: null });
+      }
+    } catch (error) {
+      setState({ mode: "error", message: error instanceof Error ? error.message : "Could not resume the saved session." });
     }
   }, []);
 
@@ -197,46 +216,54 @@ export default function App() {
   const handleSplitConfirm = useCallback(
     async (splitIndex: number, smallBoxThreshold: number, minRetainedPercentage: number, sliverMinSide: number, sliverAspectRatio: number) => {
       if (state.mode !== "main" || !state.session) return;
-      const splitData = computeSplitData(state.session.pairs, splitIndex, smallBoxThreshold, minRetainedPercentage, sliverMinSide, sliverAspectRatio);
-      await saveSplit(splitData, {
-        id: "current",
-        stage: "tiling",
-        updatedAt: Date.now(),
-      });
-      setState((prev) =>
-        prev.mode === "main"
-          ? { ...prev, stage: "tiling", split: splitData, tilingProgress: { current: 0, total: splitData.trainImages.length + splitData.validImages.length, imageName: "" } }
-          : prev,
-      );
+      setActionError("");
+      try {
+        const splitData = computeSplitData(state.session.pairs, splitIndex, smallBoxThreshold, minRetainedPercentage, sliverMinSide, sliverAspectRatio);
+        await saveSplit(splitData, {
+          id: "current",
+          stage: "tiling",
+          updatedAt: Date.now(),
+        });
+        setState((prev) =>
+          prev.mode === "main"
+            ? { ...prev, stage: "tiling", split: splitData, tilingProgress: { current: 0, total: splitData.trainImages.length + splitData.validImages.length, imageName: "" } }
+            : prev,
+        );
 
-      const tiledData = await runTiling(
-        splitData.trainImages,
-        splitData.trainLabels,
-        splitData.validImages,
-        splitData.validLabels,
-        (progress) => {
-          setState((prev) =>
-            prev.mode === "main"
-              ? { ...prev, tilingProgress: progress }
-              : prev,
-          );
-        },
-        splitData.smallBoxThreshold,
-        splitData.minRetainedPercentage,
-        splitData.sliverMinSide,
-        splitData.sliverAspectRatio,
-      );
+        const tiledData = await runTiling(
+          splitData.trainImages,
+          splitData.trainLabels,
+          splitData.validImages,
+          splitData.validLabels,
+          (progress) => {
+            setState((prev) =>
+              prev.mode === "main"
+                ? { ...prev, tilingProgress: progress }
+                : prev,
+            );
+          },
+          splitData.smallBoxThreshold,
+          splitData.minRetainedPercentage,
+          splitData.sliverMinSide,
+          splitData.sliverAspectRatio,
+        );
 
-      await saveTiled(tiledData, {
-        id: "current",
-        stage: "tiled",
-        updatedAt: Date.now(),
-      });
-      setState((prev) =>
-        prev.mode === "main"
-          ? { ...prev, stage: "tiled", tiled: tiledData, tilingProgress: null }
-          : prev,
-      );
+        await saveTiled(tiledData, {
+          id: "current",
+          stage: "tiled",
+          updatedAt: Date.now(),
+        });
+        setState((prev) =>
+          prev.mode === "main"
+            ? { ...prev, stage: "tiled", tiled: tiledData, tilingProgress: null }
+            : prev,
+        );
+      } catch (error) {
+        setActionError(error instanceof Error ? error.message : "Could not tile the dataset.");
+        setState((prev) => prev.mode === "main"
+          ? { ...prev, stage: "split-picker", tilingProgress: null }
+          : prev);
+      }
     },
     [state],
   );
@@ -274,84 +301,96 @@ export default function App() {
   }, []);
 
   const handleSaveLabel = useCallback(
-    (split: "train" | "valid", labelName: string, text: string) => {
-      setState((prev) => {
-        if (prev.mode !== "main" || !prev.tiled) return prev;
-        const newBlob = new Blob([text], { type: "text/plain" });
-        const updateLabels = (labels: TiledFile[]) =>
-          labels.map((l) =>
-            l.name === labelName ? { ...l, blob: newBlob } : l,
-          );
-        const tiled: TiledData = {
-          ...prev.tiled,
-          trainLabels:
-            split === "train"
-              ? updateLabels(prev.tiled.trainLabels)
-              : prev.tiled.trainLabels,
-          validLabels:
-            split === "valid"
-              ? updateLabels(prev.tiled.validLabels)
-              : prev.tiled.validLabels,
-        };
-        saveTiled(tiled, {
-          id: "current",
-          stage: "tile-viewer",
-          updatedAt: Date.now(),
-        }).catch(() => {});
-        return { ...prev, tiled };
-      });
+    async (split: "train" | "valid", labelName: string, text: string): Promise<void> => {
+      if (state.mode !== "main" || !state.tiled) throw new Error("No tiled dataset is open.");
+      const newBlob = new Blob([text], { type: "text/plain" });
+      const sourceLabels = split === "train" ? state.tiled.trainLabels : state.tiled.validLabels;
+      if (!sourceLabels.some((label) => label.name === labelName)) {
+        throw new Error(`Annotation ${labelName} was not found.`);
+      }
+      const updateLabels = (labels: TiledFile[]) =>
+        labels.map((label) => label.name === labelName ? { ...label, blob: newBlob } : label);
+      const tiled: TiledData = {
+        ...state.tiled,
+        trainLabels: split === "train" ? updateLabels(state.tiled.trainLabels) : state.tiled.trainLabels,
+        validLabels: split === "valid" ? updateLabels(state.tiled.validLabels) : state.tiled.validLabels,
+      };
+      await saveTiled(tiled, { id: "current", stage: "tile-viewer", updatedAt: Date.now() });
+      setState((prev) => prev.mode === "main"
+        ? { ...prev, tiled, finalZip: null, finalization: prev.finalization?.oldFoldersDeleted
+          ? { ...prev.finalization, finalizedAt: 0 } : null }
+        : prev);
     },
-    [],
+    [state],
   );
 
-  const handleGoToFinalization = useCallback(() => {
-    setState((prev) =>
-      prev.mode === "main"
-        ? { ...prev, stage: "finalization-summary" }
-        : prev,
-    );
+  const handleGoToFinalization = useCallback(async () => {
+    setState((prev) => prev.mode === "main" ? { ...prev, stage: "finalizing" } : prev);
+    try {
+      const record = await loadSession();
+      if (!record?.tiled || !record.session) throw new Error("No saved tiled dataset is available.");
+      const cachedZipValid = Boolean(record.finalZip && record.finalization?.zipVersion === ZIP_VERSION);
+      const target: AppStage = cachedZipValid ? "finalized" : "finalization-summary";
+      await updateSessionStage(target);
+      setState((prev) => prev.mode === "main"
+        ? { ...prev, stage: target, finalZip: cachedZipValid ? record.finalZip : null, finalization: record.finalization }
+        : prev);
+      setActionError("");
+    } catch (error) {
+      setState((prev) => prev.mode === "main" ? { ...prev, stage: "tile-viewer" } : prev);
+      setActionError(error instanceof Error ? error.message : "Could not open finalization.");
+    }
   }, []);
 
-  const handleBackFromFinalization = useCallback(() => {
-    setState((prev) =>
-      prev.mode === "main"
-        ? { ...prev, stage: "tile-viewer" }
-        : prev,
-    );
+  const handleBackFromFinalization = useCallback(async () => {
+    try {
+      await updateSessionStage("tile-viewer");
+      setState((prev) => prev.mode === "main" ? { ...prev, stage: "tile-viewer" } : prev);
+      setActionError("");
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Could not reopen the editor.");
+    }
   }, []);
 
-  const handleFinalize = useCallback((zipBlob: Blob) => {
+  const handleFinalize = useCallback(async (zipBlob: Blob): Promise<void> => {
     const finalization: FinalizationState = {
       finalizedAt: Date.now(),
-      oldFoldersDeleted: false,
+      oldFoldersDeleted: state.mode === "main" ? state.finalization?.oldFoldersDeleted ?? false : false,
       zipVersion: ZIP_VERSION,
     };
-    setState((prev) =>
-      prev.mode === "main"
-        ? { ...prev, finalZip: zipBlob, finalization }
-        : prev,
-    );
-    saveFinalization(finalization, {
+    await saveFinalization(finalization, {
       id: "current",
       stage: "finalized",
       updatedAt: Date.now(),
-    }, zipBlob).catch(() => {});
-  }, []);
+    }, zipBlob);
+    setState((prev) =>
+      prev.mode === "main"
+        ? { ...prev, stage: "finalized", finalZip: zipBlob, finalization }
+        : prev,
+    );
+  }, [state]);
 
-  const handleDeleteOldFolders = useCallback(() => {
-    setState((prev) => {
-      if (prev.mode !== "main" || !prev.finalization) return prev;
-      const finalization = {
-        ...prev.finalization,
-        oldFoldersDeleted: true,
-      };
-      saveFinalization(finalization, {
-        id: "current",
-        stage: prev.stage,
-        updatedAt: Date.now(),
-      }, prev.finalZip).catch(() => {});
-      return { ...prev, finalization };
-    });
+  const handleDeleteOldFolders = useCallback(async (): Promise<void> => {
+    if (state.mode !== "main" || !state.tiled) throw new Error("No tiled dataset is open.");
+    const finalization: FinalizationState = {
+      finalizedAt: state.finalization?.finalizedAt ?? 0,
+      oldFoldersDeleted: true,
+      zipVersion: state.finalization?.zipVersion ?? ZIP_VERSION,
+    };
+    const record = await cleanupIntermediateData(finalization);
+    setState((prev) => prev.mode === "main"
+      ? { ...prev, session: record.session, split: null, finalization }
+      : prev);
+  }, [state]);
+
+  const handleBackFromFinalized = useCallback(async () => {
+    try {
+      await updateSessionStage("tile-viewer");
+      setState((prev) => prev.mode === "main" ? { ...prev, stage: "tile-viewer" } : prev);
+      setActionError("");
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Could not reopen the editor.");
+    }
   }, []);
 
   useEffect(() => {
@@ -424,6 +463,7 @@ export default function App() {
       </header>
 
       <main className="py-12 px-6">
+        {actionError && <div role="alert" className="max-w-2xl mx-auto mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{actionError}</div>}
         {stage === "upload" && (
           <div className="space-y-8">
             <div className="text-center mb-8">
@@ -618,12 +658,14 @@ export default function App() {
                   View Tiles
                   <ArrowRight className="w-4 h-4" />
                 </button>
-                <button
-                  onClick={handleBackFromTiled}
-                  className="text-sm text-slate-500 hover:text-slate-700"
-                >
-                  Adjust split
-                </button>
+                {!finalization?.oldFoldersDeleted && (
+                  <button
+                    onClick={handleBackFromTiled}
+                    className="text-sm text-slate-500 hover:text-slate-700"
+                  >
+                    Adjust split
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -637,6 +679,12 @@ export default function App() {
             onSave={handleSaveLabel}
             onFinalize={handleGoToFinalization}
           />
+        )}
+
+        {stage === "finalizing" && (
+          <div className="flex items-center justify-center py-20 text-sm text-slate-500">
+            <Loader2 className="w-4 h-4 animate-spin mr-2" /> Opening finalization...
+          </div>
         )}
 
         {stage === "finalization-summary" && tiled && session && (
@@ -664,7 +712,7 @@ export default function App() {
               <p className="text-sm text-slate-500 mb-6">
                 Your RFDETR training dataset is ready to download.
                 {finalization?.oldFoldersDeleted && (
-                  <> Intermediate folders have been cleaned up.</>
+                  <> Intermediate source data has been cleaned up.</>
                 )}
               </p>
               {finalZip && (
@@ -674,6 +722,24 @@ export default function App() {
                 />
               )}
               <div className="flex items-center justify-center gap-3 mt-6">
+                {tiled && (
+                  <button
+                    onClick={handleBackFromFinalized}
+                    className="px-6 py-3 rounded-xl bg-slate-100 text-slate-700 font-semibold text-sm hover:bg-slate-200 transition-colors"
+                  >
+                    Back to editor
+                  </button>
+                )}
+                {!finalization?.oldFoldersDeleted && tiled && (
+                  <button
+                    onClick={() => { void handleDeleteOldFolders().catch((error) => {
+                      setActionError(error instanceof Error ? error.message : "Could not delete intermediate data.");
+                    }); }}
+                    className="px-6 py-3 rounded-xl bg-slate-100 text-slate-700 font-semibold text-sm hover:bg-slate-200 transition-colors"
+                  >
+                    Delete intermediate data
+                  </button>
+                )}
                 <button
                   onClick={handleStartFresh}
                   className="px-6 py-3 rounded-xl bg-slate-100 text-slate-700 font-semibold text-sm hover:bg-slate-200 transition-colors inline-flex items-center gap-2"

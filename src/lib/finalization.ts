@@ -1,8 +1,8 @@
 import JSZip from "jszip";
 import type { TiledData, TiledFile } from "./types";
-import { parseYoloText } from "./tiling";
+import { parseYoloText, validateYoloText } from "./tiling";
 
-export const ZIP_VERSION = 2;
+export const ZIP_VERSION = 3;
 
 export interface FinalSummary {
   totalImages: number;
@@ -24,6 +24,8 @@ export async function computeFinalSummaryAsync(
 
   for (const label of allLabels) {
     const text = await label.blob.text();
+    const issue = validateYoloText(text, classNames.length)[0];
+    if (issue) throw new Error(`${label.name}, line ${issue.lineNumber}: ${issue.reason}`);
     const lines = parseYoloText(text);
     totalAnnotations += lines.length;
     for (const line of lines) {

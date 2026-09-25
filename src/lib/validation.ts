@@ -1,5 +1,6 @@
 import JSZip from "jszip";
 import { normalizeNumericFilenames } from "./filename-normalization";
+import { validateYoloText } from "./tiling";
 import type {
   ValidationIssue,
   ImageFile,
@@ -328,6 +329,20 @@ export async function validateZipFiles(
     }
   }
 
+  const classCount = objNames?.text.trim() ? objNames.text.trim().split(/\r?\n/).length : 0;
+  if (objNames && classCount === 0) {
+    issues.push({ type: "invalid-annotation", filename: "obj.names", reason: "obj.names must define at least one class." });
+  }
+  if (objNames) for (const annotation of annotations) {
+    for (const issue of validateYoloText(annotation.text, classCount)) {
+      issues.push({
+        type: "invalid-annotation",
+        filename: annotation.name,
+        reason: `Line ${issue.lineNumber}: ${issue.reason}`,
+      });
+    }
+  }
+
   const pairs: ValidatedPair[] = [];
   const imgByBase = new Map(images.map((img) => [getBaseName(img.name), img]));
   for (const ann of annotations) {
@@ -345,7 +360,8 @@ export async function validateZipFiles(
       i.type === "missing-obj-names" ||
       i.type === "orphaned-image" ||
       i.type === "orphaned-annotation" ||
-      i.type === "duplicate-filename",
+      i.type === "duplicate-filename" ||
+      i.type === "invalid-annotation",
   );
 
   const resolutionFailures = issues.filter((i) => i.type === "resolution");

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import JSZip from "jszip";
-import { buildFinalZip } from "../src/lib/finalization";
+import { buildFinalZip, computeFinalSummaryAsync } from "../src/lib/finalization";
 import type { TiledData, TiledFile } from "../src/lib/types";
 
 function makeTiledFile(name: string, text: string): TiledFile {
@@ -20,7 +20,6 @@ describe("buildFinalZip structure", () => {
     const blob = await buildFinalZip(tiled, "class0\nclass1\n", "abc_xyz");
     const zip = await JSZip.loadAsync(blob);
 
-    const topEntries = Object.keys(zip.files).filter((k) => !k.endsWith("/"));
     const topFolders = Object.keys(zip.files).filter((k) => k.endsWith("/"));
 
     // Top-level should be exactly RFDETR_abc_xyz/
@@ -46,5 +45,18 @@ describe("buildFinalZip structure", () => {
     const allPaths = Object.keys(zip.files);
     const bareFolderPaths = allPaths.filter((p) => p.startsWith("abc_xyz/"));
     expect(bareFolderPaths.length).toBe(0);
+  });
+});
+
+describe("finalization validation", () => {
+  it("identifies an invalid persisted annotation before export", async () => {
+    const tiled: TiledData = {
+      trainImages: [],
+      trainLabels: [makeTiledFile("001_1.txt", "3 0.5 0.5 0.2 0.2")],
+      validImages: [],
+      validLabels: [],
+      tiledAt: Date.now(),
+    };
+    await expect(computeFinalSummaryAsync(tiled, ["person"])).rejects.toThrow(/001_1\.txt, line 1: Class ID 3/);
   });
 });

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { recomputeAnnotationForTile, TILE_0, parseYoloText } from "../src/lib/tiling";
 import { runTiling } from "../src/lib/tiling-pipeline";
 import { computeSplitData } from "../src/components/SplitPicker";
-import { DEFAULT_SMALL_BOX_THRESHOLD, sanitizeSliverValue } from "../src/lib/tiling-settings";
+import { DEFAULT_SMALL_BOX_THRESHOLD, DEFAULT_SLIVER_MIN_SIDE, DEFAULT_SLIVER_ASPECT_RATIO, sanitizeSliverValue } from "../src/lib/tiling-settings";
 
 const box = (w: number, h: number, left = 200, top = 200) => ({
   cls: 1, xCenter: (left + w / 2) / 2560, yCenter: (top + h / 2) / 1440,
@@ -13,6 +13,10 @@ const convert = (line: ReturnType<typeof box>, side = 10, ratio = 6) =>
 afterEach(() => vi.unstubAllGlobals());
 
 describe("clipped sliver filter", () => {
+  it("uses the requested default minimum side and aspect ratio", () => {
+    expect(DEFAULT_SLIVER_MIN_SIDE).toBe(25);
+    expect(DEFAULT_SLIVER_ASPECT_RATIO).toBe(6);
+  });
   it("removes a clipped 8 x 180 vertical fragment", () => {
     expect(convert(box(40, 180, 1432))).toBeNull();
   });

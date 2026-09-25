@@ -41,32 +41,59 @@ export const TILE_1: TileRange = { xMin: 1120, xMax: 2560 };
 export const TILES: TileRange[] = [TILE_0, TILE_1];
 export const TILE_SUFFIXES = ["_1", "_2"];
 
-export function parseYoloLine(line: string): YoloLine | null {
+const DECIMAL = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i;
+const BOUNDARY_ROUNDOFF = 0.000001;
+
+function parseYoloLineDetailed(line: string, classCount?: number, requireBounds = false): { value: YoloLine | null; reason: string | null } {
   const parts = line.trim().split(/\s+/);
-  if (parts.length < 5) return null;
-  const cls = parseInt(parts[0], 10);
-  const xCenter = parseFloat(parts[1]);
-  const yCenter = parseFloat(parts[2]);
-  const width = parseFloat(parts[3]);
-  const height = parseFloat(parts[4]);
-  if (
-    Number.isNaN(cls) ||
-    Number.isNaN(xCenter) ||
-    Number.isNaN(yCenter) ||
-    Number.isNaN(width) ||
-    Number.isNaN(height)
-  ) {
-    return null;
+  if (parts.length !== 5) return { value: null, reason: "Expected exactly five fields: class, x center, y center, width, height." };
+  if (!/^\d+$/.test(parts[0]) || !Number.isSafeInteger(Number(parts[0]))) {
+    return { value: null, reason: "Class ID must be a nonnegative integer." };
   }
-  return { cls, xCenter, yCenter, width, height };
+  const cls = Number(parts[0]);
+  if (classCount !== undefined && cls >= classCount) {
+    return { value: null, reason: `Class ID ${cls} is outside obj.names (0-${classCount - 1}).` };
+  }
+  if (parts.slice(1).some((part) => !DECIMAL.test(part))) {
+    return { value: null, reason: "Coordinates and dimensions must be valid numbers." };
+  }
+  const [xCenter, yCenter, width, height] = parts.slice(1).map(Number);
+  if (![xCenter, yCenter, width, height].every(Number.isFinite)) {
+    return { value: null, reason: "Coordinates and dimensions must be finite." };
+  }
+  if (width <= 0 || height <= 0 || width > 1 || height > 1) {
+    return { value: null, reason: "Width and height must be greater than zero and at most one." };
+  }
+  if (requireBounds && (xCenter < 0 || xCenter > 1 || yCenter < 0 || yCenter > 1 ||
+      xCenter - width / 2 < -BOUNDARY_ROUNDOFF || xCenter + width / 2 > 1 + BOUNDARY_ROUNDOFF ||
+      yCenter - height / 2 < -BOUNDARY_ROUNDOFF || yCenter + height / 2 > 1 + BOUNDARY_ROUNDOFF)) {
+    return { value: null, reason: "Bounding box extends outside normalized image coordinates." };
+  }
+  return { value: { cls, xCenter, yCenter, width, height }, reason: null };
+}
+
+export function parseYoloLine(line: string): YoloLine | null {
+  return parseYoloLineDetailed(line).value;
+}
+
+export function validateYoloText(text: string, classCount?: number): { lineNumber: number; reason: string }[] {
+  const issues: { lineNumber: number; reason: string }[] = [];
+  text.split(/\r?\n/).forEach((raw, index) => {
+    if (!raw.trim()) return;
+    const { reason } = parseYoloLineDetailed(raw, classCount, true);
+    if (reason) issues.push({ lineNumber: index + 1, reason });
+  });
+  return issues;
 }
 
 export function parseYoloText(text: string): YoloLine[] {
   const lines: YoloLine[] = [];
-  for (const raw of text.split("\n")) {
-    const parsed = parseYoloLine(raw);
-    if (parsed) lines.push(parsed);
-  }
+  text.split(/\r?\n/).forEach((raw, index) => {
+    if (!raw.trim()) return;
+    const { value, reason } = parseYoloLineDetailed(raw);
+    if (reason || !value) throw new Error(`Annotation line ${index + 1}: ${reason}`);
+    lines.push(value);
+  });
   return lines;
 }
 

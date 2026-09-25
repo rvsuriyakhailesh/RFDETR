@@ -29,11 +29,6 @@ function getBaseName(filename: string): string {
   return dot >= 0 ? filename.substring(0, dot) : filename;
 }
 
-function getExtension(filename: string): string {
-  const dot = filename.lastIndexOf(".");
-  return dot >= 0 ? filename.substring(dot) : "";
-}
-
 export function SplitPicker({
   pairs,
   initialSplitIndex,

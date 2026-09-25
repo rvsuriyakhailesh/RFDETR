@@ -5,6 +5,7 @@ export type ValidationIssueType =
   | "resolution"
   | "missing-obj-names"
   | "duplicate-filename"
+  | "invalid-annotation"
   | "zip-structure";
 
 export interface ValidationIssue {
