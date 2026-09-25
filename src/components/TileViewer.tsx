@@ -122,6 +122,8 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
   const [savedLabels, setSavedLabels] = useState<YoloLine[]>([]);
   const [showClassNames, setShowClassNames] = useState(false);
   const [showBoxes, setShowBoxes] = useState(true);
+  const [showManBoxes, setShowManBoxes] = useState(true);
+  const [showChairBoxes, setShowChairBoxes] = useState(true);
   const [transform, setTransform] = useState<Transform>(RESET_TRANSFORM);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [tool, setTool] = useState<Tool>("pan");
@@ -187,8 +189,34 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
 
   const classNames = useMemo(() => {
     if (!objNamesText) return [];
-    return objNamesText.trim().split("\n");
+    return objNamesText.trim().split(/\r?\n/);
   }, [objNamesText]);
+
+  const manClassId = useMemo(
+    () => classNames.findIndex((name) => name.trim().toLowerCase() === "man"),
+    [classNames],
+  );
+  const chairClassId = useMemo(
+    () => classNames.findIndex((name) => name.trim().toLowerCase() === "chair"),
+    [classNames],
+  );
+  const isClassVisible = useCallback(
+    (cls: number) =>
+      (cls !== manClassId || showManBoxes) &&
+      (cls !== chairClassId || showChairBoxes),
+    [manClassId, chairClassId, showManBoxes, showChairBoxes],
+  );
+
+  useEffect(() => {
+    setSelectedBoxes((selected) => {
+      const visible = new Set<number>();
+      selected.forEach((index) => {
+        const box = labelsRef.current[index];
+        if (box && isClassVisible(box.cls)) visible.add(index);
+      });
+      return visible.size === selected.size ? selected : visible;
+    });
+  }, [isClassVisible]);
 
   const entry = entries[currentIndex];
   const hasUnsavedChanges = useMemo(
@@ -457,6 +485,7 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
 
       for (let i = 0; i < labelsRef.current.length; i++) {
         const box = labelsRef.current[i];
+        if (!isClassVisible(box.cls)) continue;
         const left = rect.left + (box.xCenter - box.width / 2) * rect.width;
         const right = rect.left + (box.xCenter + box.width / 2) * rect.width;
         const top = rect.top + (box.yCenter - box.height / 2) * rect.height;
@@ -474,7 +503,7 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
       results.sort((a, b) => a.area - b.area);
       return results.map((r) => r.index);
     },
-    [],
+    [isClassVisible],
   );
 
   const handleViewportMouseDown = useCallback(
@@ -936,9 +965,35 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
               onClick={() => setShowBoxes((v) => !v)}
               className={`p-1.5 rounded-lg transition-colors cursor-pointer ${showBoxes ? "bg-slate-200 text-slate-700" : "text-slate-500 hover:bg-slate-100"}`}
               title="Toggle visibility (V)"
+              aria-label="Toggle visibility of all boxes"
+              aria-pressed={showBoxes}
             >
               {showBoxes ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
             </button>
+            {manClassId >= 0 && (
+              <button
+                onClick={() => setShowManBoxes((visible) => !visible)}
+                className={`p-1.5 rounded-lg transition-colors cursor-pointer flex items-center gap-1 text-xs font-medium ${showManBoxes ? "bg-slate-200 text-slate-700" : "text-slate-500 hover:bg-slate-100"}`}
+                title={`${showManBoxes ? "Hide" : "Show"} Man boxes`}
+                aria-label={`${showManBoxes ? "Hide" : "Show"} Man boxes`}
+                aria-pressed={showManBoxes}
+              >
+                {showManBoxes ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+                Man
+              </button>
+            )}
+            {chairClassId >= 0 && (
+              <button
+                onClick={() => setShowChairBoxes((visible) => !visible)}
+                className={`p-1.5 rounded-lg transition-colors cursor-pointer flex items-center gap-1 text-xs font-medium ${showChairBoxes ? "bg-slate-200 text-slate-700" : "text-slate-500 hover:bg-slate-100"}`}
+                title={`${showChairBoxes ? "Hide" : "Show"} Chair boxes`}
+                aria-label={`${showChairBoxes ? "Hide" : "Show"} Chair boxes`}
+                aria-pressed={showChairBoxes}
+              >
+                {showChairBoxes ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+                Chair
+              </button>
+            )}
             <button
               onClick={() => setShowClassNames((v) => !v)}
               className={`p-1.5 rounded-lg transition-colors cursor-pointer ${showClassNames ? "bg-slate-200 text-slate-700" : "text-slate-500 hover:bg-slate-100"}`}
@@ -1027,7 +1082,7 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
               />
               {showBoxes && [
                 ...labels.map((line, i) => ({ line, i, isSelected: selectedBoxes.has(i) }))
-                  .filter((b) => !b.isSelected)
+                  .filter((b) => !b.isSelected && isClassVisible(b.line.cls))
                   .map(({ line, i }) => {
                     const color = getClassColor(line.cls);
                     const leftPct = (line.xCenter - line.width / 2) * 100;
@@ -1063,7 +1118,7 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
                     );
                   }),
                 ...labels.map((line, i) => ({ line, i, isSelected: selectedBoxes.has(i) }))
-                  .filter((b) => b.isSelected)
+                  .filter((b) => b.isSelected && isClassVisible(b.line.cls))
                   .map(({ line, i }) => {
                     const color = getClassColor(line.cls);
                     const leftPct = (line.xCenter - line.width / 2) * 100;
