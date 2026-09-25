@@ -17,6 +17,8 @@ import {
   Eye,
   EyeOff,
   Pencil,
+  Copy,
+  ClipboardPaste,
   Check,
   AlertCircle,
   CheckCircle2,
@@ -124,6 +126,7 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [tool, setTool] = useState<Tool>("pan");
   const [selectedBoxes, setSelectedBoxes] = useState<Set<number>>(new Set());
+  const [copiedBoxes, setCopiedBoxes] = useState<YoloLine[]>([]);
   const [undoSnapshot, setUndoSnapshot] = useState<YoloLine[] | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isDrawing, setIsDrawing] = useState(false);
@@ -591,6 +594,27 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
     setSelectedBoxes(new Set());
   }, [selectedBoxes]);
 
+  const copySelected = useCallback(() => {
+    const copied = [...selectedBoxes]
+      .sort((a, b) => a - b)
+      .map((index) => labelsRef.current[index])
+      .filter((box): box is YoloLine => Boolean(box))
+      .map((box) => ({ ...box }));
+    if (copied.length > 0) setCopiedBoxes(copied);
+  }, [selectedBoxes]);
+
+  const pasteCopied = useCallback(() => {
+    if (copiedBoxes.length === 0 || labelsLoading || pendingDraw || showUnsavedDialog) return;
+    const pasted = copiedBoxes.map((box) => ({
+      ...box,
+      xCenter: Math.min(1 - box.width / 2, box.xCenter + 0.02),
+      yCenter: Math.min(1 - box.height / 2, box.yCenter + 0.02),
+    }));
+    setUndoSnapshot(labelsRef.current);
+    setLabels((prev) => [...prev, ...pasted]);
+    setSelectedBoxes(new Set(pasted.map((_, index) => labelsRef.current.length + index)));
+  }, [copiedBoxes, labelsLoading, pendingDraw, showUnsavedDialog]);
+
   const undo = useCallback(() => {
     if (!undoSnapshot) return;
     setLabels(undoSnapshot);
@@ -678,7 +702,18 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
       if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
       if (isResizing || isMovingBox) return;
 
-      if (e.key === "ArrowLeft") {
+      if ((e.ctrlKey || e.metaKey) && (e.key === "a" || e.key === "A")) {
+        e.preventDefault();
+        goPrev();
+      } else if (e.shiftKey && (e.key === "c" || e.key === "C")) {
+        if (selectedBoxesRef.current.size === 0) return;
+        e.preventDefault();
+        copySelected();
+      } else if (e.shiftKey && (e.key === "v" || e.key === "V")) {
+        if (copiedBoxes.length === 0) return;
+        e.preventDefault();
+        pasteCopied();
+      } else if (e.key === "ArrowLeft") {
         e.preventDefault();
         goPrev();
       } else if (e.key === "ArrowRight") {
@@ -714,7 +749,7 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [goPrev, goNext, deleteSelected, undo, save, toggleFullscreen, onBack, pendingDraw, isDrawing, isDragging, showUnsavedDialog, isResizing, isMovingBox]);
+  }, [goPrev, goNext, copySelected, pasteCopied, copiedBoxes.length, deleteSelected, undo, save, toggleFullscreen, onBack, pendingDraw, isDrawing, isDragging, showUnsavedDialog, isResizing, isMovingBox]);
 
   if (entries.length === 0) {
     return (
@@ -750,7 +785,8 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
             Click a box to select (smallest box wins on overlap, click again to
             cycle), Ctrl+click to select or deselect multiple boxes. Release
             Ctrl and drag a selected box to move the group. Drag handles to
-            resize, Del to delete, D for draw mode, Ctrl+S to save. Scroll to zoom,
+            resize, Del to delete, Shift+C/Shift+V to copy and paste selected boxes,
+            Ctrl+A for the previous image, D for draw mode, Ctrl+S to save. Scroll to zoom,
             drag to pan.
           </p>
         </div>
@@ -860,6 +896,22 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
               title="Delete selected (Del)"
             >
               <Trash2 className="w-4 h-4" />
+            </button>
+            <button
+              onClick={copySelected}
+              disabled={selectedBoxes.size === 0}
+              className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-600 disabled:opacity-30 disabled:hover:bg-transparent cursor-pointer"
+              title="Copy selected box(es) (Shift+C)"
+            >
+              <Copy className="w-4 h-4" />
+            </button>
+            <button
+              onClick={pasteCopied}
+              disabled={copiedBoxes.length === 0}
+              className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-600 disabled:opacity-30 disabled:hover:bg-transparent cursor-pointer"
+              title="Paste copied box(es) (Shift+V)"
+            >
+              <ClipboardPaste className="w-4 h-4" />
             </button>
             <button
               onClick={undo}
