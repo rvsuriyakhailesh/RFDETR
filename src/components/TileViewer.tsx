@@ -1155,24 +1155,26 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
             {manClassId >= 0 && (
               <button
                 onClick={() => setShowManBoxes((visible) => !visible)}
-                className={`p-1.5 rounded-lg transition-colors cursor-pointer flex items-center gap-1 text-xs font-medium ${showManBoxes ? "bg-slate-200 text-slate-700" : "text-slate-500 hover:bg-slate-100"}`}
-                title={`${showManBoxes ? "Hide" : "Show"} Man boxes`}
+                disabled={!showBoxes}
+                className={`p-1.5 rounded-lg transition-colors flex items-center gap-1 text-xs font-medium ${!showBoxes ? "text-slate-400 opacity-50 cursor-not-allowed" : showManBoxes ? "bg-slate-200 text-slate-700 cursor-pointer" : "text-slate-500 hover:bg-slate-100 cursor-pointer"}`}
+                title={showBoxes ? `${showManBoxes ? "Hide" : "Show"} Man boxes` : "Show all boxes to change Man visibility"}
                 aria-label={`${showManBoxes ? "Hide" : "Show"} Man boxes`}
-                aria-pressed={showManBoxes}
+                aria-pressed={showBoxes && showManBoxes}
               >
-                {showManBoxes ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+                {showBoxes && showManBoxes ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
                 Man
               </button>
             )}
             {chairClassId >= 0 && (
               <button
                 onClick={() => setShowChairBoxes((visible) => !visible)}
-                className={`p-1.5 rounded-lg transition-colors cursor-pointer flex items-center gap-1 text-xs font-medium ${showChairBoxes ? "bg-slate-200 text-slate-700" : "text-slate-500 hover:bg-slate-100"}`}
-                title={`${showChairBoxes ? "Hide" : "Show"} Chair boxes`}
+                disabled={!showBoxes}
+                className={`p-1.5 rounded-lg transition-colors flex items-center gap-1 text-xs font-medium ${!showBoxes ? "text-slate-400 opacity-50 cursor-not-allowed" : showChairBoxes ? "bg-slate-200 text-slate-700 cursor-pointer" : "text-slate-500 hover:bg-slate-100 cursor-pointer"}`}
+                title={showBoxes ? `${showChairBoxes ? "Hide" : "Show"} Chair boxes` : "Show all boxes to change Chair visibility"}
                 aria-label={`${showChairBoxes ? "Hide" : "Show"} Chair boxes`}
-                aria-pressed={showChairBoxes}
+                aria-pressed={showBoxes && showChairBoxes}
               >
-                {showChairBoxes ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+                {showBoxes && showChairBoxes ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
                 Chair
               </button>
             )}
