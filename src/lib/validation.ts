@@ -87,7 +87,18 @@ function determineZipNames(
   return null;
 }
 
+/** Active extracted entries, with names normalized exactly once at upload. */
+export interface ValidationDataset {
+  backupName: string;
+  nonBackupName: string;
+  baseName: string;
+  images: { name: string; entry: JSZip.JSZipObject }[];
+  annotations: { name: string; entry: JSZip.JSZipObject }[];
+  objNamesEntry?: JSZip.JSZipObject;
+}
+
 export interface ValidationResult {
+  dataset?: ValidationDataset;
   issues: ValidationIssue[];
   session: ValidatedSession | null;
 }
@@ -159,19 +170,25 @@ export async function validateZipFiles(
   if (normalized.issues.length > 0) {
     return { issues: normalized.issues, session: null };
   }
-  const dataNames = normalized.imageNames;
-  const objTrainNames = normalized.annotationNames;
-  // Keep ZIP entries and their bytes untouched; use the resolved names for
-  // validation and every persisted file in the resulting session.
-  const imageNames = new Map(dataFiles.map((file, index) => [file, dataNames[index]]));
-  const annotationNames = new Map(objTrainFiles.map((file, index) => [file, objTrainNames[index]]));
+  return validateDataset({
+    backupName, nonBackupName, baseName,
+    images: dataFiles.map((entry, index) => ({ entry, name: normalized.imageNames[index] })),
+    annotations: objTrainFiles.map((entry, index) => ({ entry, name: normalized.annotationNames[index] })),
+    objNamesEntry: nonBackupEntries.find(f => normalizePath(f.name) === "obj.names"),
+  });
+}
+
+export async function validateDataset(dataset: ValidationDataset): Promise<ValidationResult> {
+  const issues: ValidationIssue[] = [];
+  const { backupName, nonBackupName, baseName, objNamesEntry } = dataset;
+  const dataFiles = dataset.images.map(f => f.entry);
+  const objTrainFiles = dataset.annotations.map(f => f.entry);
+  const dataNames = dataset.images.map(f => f.name);
+  const objTrainNames = dataset.annotations.map(f => f.name);
+  const imageNames = new Map(dataset.images.map(f => [f.entry, f.name]));
+  const annotationNames = new Map(dataset.annotations.map(f => [f.entry, f.name]));
   const imageName = (file: JSZip.JSZipObject) => imageNames.get(file)!;
   const annotationName = (file: JSZip.JSZipObject) => annotationNames.get(file)!;
-
-  const objNamesEntry = nonBackupEntries.find((f) => {
-    const norm = normalizePath(f.name);
-    return norm === "obj.names";
-  });
 
   if (dataFiles.length === 0) {
     issues.push({
@@ -246,36 +263,23 @@ export async function validateZipFiles(
     }
   }
 
-  const matchedPairs: { dataFile: JSZip.JSZipObject; objFile: JSZip.JSZipObject }[] = [];
-  const objByName = new Map<string, JSZip.JSZipObject>();
-  for (const f of objTrainFiles) {
-    objByName.set(getBaseName(annotationName(f)), f);
-  }
-  for (const f of dataFiles) {
-    const base = getBaseName(imageName(f));
-    const match = objByName.get(base);
-    if (match) {
-      matchedPairs.push({ dataFile: f, objFile: match });
-    }
-  }
-
   const images: ImageFile[] = [];
-  for (const pair of matchedPairs) {
+  for (const dataFile of dataFiles) {
     try {
-      const blob = await pair.dataFile.async("blob");
+      const blob = await dataFile.async("blob");
       let dims: { width: number; height: number };
       try {
         dims = await getImageDimensions(blob);
       } catch {
         issues.push({
           type: "resolution",
-          filename: imageName(pair.dataFile),
+          filename: imageName(dataFile),
           reason: "Could not read image dimensions (file may be corrupted).",
         });
         continue;
       }
 
-      const imgName = imageName(pair.dataFile);
+      const imgName = imageName(dataFile);
       if (dims.width !== EXPECTED_WIDTH || dims.height !== EXPECTED_HEIGHT) {
         issues.push({
           type: "resolution",
@@ -294,22 +298,22 @@ export async function validateZipFiles(
     } catch {
       issues.push({
         type: "resolution",
-        filename: imageName(pair.dataFile),
+        filename: imageName(dataFile),
         reason: "Failed to extract image data from zip.",
       });
     }
   }
 
   const annotations: AnnotationFile[] = [];
-  for (const pair of matchedPairs) {
+  for (const objFile of objTrainFiles) {
     try {
-      const text = await pair.objFile.async("string");
-      const annName = annotationName(pair.objFile);
+      const text = await objFile.async("string");
+      const annName = annotationName(objFile);
       annotations.push({ name: annName, text });
     } catch {
       issues.push({
         type: "zip-structure",
-        filename: annotationName(pair.objFile),
+        filename: annotationName(objFile),
         reason: "Failed to extract annotation text from zip.",
       });
     }
@@ -378,5 +382,27 @@ export async function validateZipFiles(
         }
       : null;
 
-  return { issues, session };
+  return { issues, session, dataset };
+}
+
+/** Build and validate a replacement before callers commit any application state. */
+export async function deleteResolutionErrors(
+  current: ValidationResult,
+  filenames: string[],
+): Promise<ValidationResult> {
+  if (!current.dataset || filenames.length === 0) throw new Error("No resolution-error files selected.");
+  const requested = new Set(filenames);
+  const allowed = new Set(current.issues.filter(i => i.type === "resolution").map(i => i.filename));
+  if ([...requested].some(name => !allowed.has(name) || !current.dataset!.images.some(f => f.name === name))) {
+    throw new Error("The resolution-error list changed. No files were deleted.");
+  }
+  const removedBases = new Set([...requested].map(getBaseName));
+  const images = current.dataset.images.filter(f => !requested.has(f.name));
+  // A valid image with another extension may share this annotation. Refuse the
+  // whole operation rather than delete a valid image or leave it orphaned.
+  if (images.some(f => removedBases.has(getBaseName(f.name)))) {
+    throw new Error("An annotation is shared with a remaining image. No files were deleted; resolve the duplicate basenames first.");
+  }
+  const annotations = current.dataset.annotations.filter(f => !removedBases.has(getBaseName(f.name)));
+  return validateDataset({ ...current.dataset, images, annotations });
 }

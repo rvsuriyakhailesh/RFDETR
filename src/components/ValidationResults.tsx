@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -15,6 +15,10 @@ interface ValidationResultsProps {
   issues: ValidationIssue[];
   onSuccess: () => void;
   onReset: () => void;
+  onDeleteResolutionErrors: (filenames: string[]) => Promise<void>;
+  isDeleting: boolean;
+  imageCount?: number;
+  annotationCount?: number;
 }
 
 const ISSUE_META: Record<
@@ -75,7 +79,14 @@ export function ValidationResults({
   issues,
   onSuccess,
   onReset,
+  onDeleteResolutionErrors, isDeleting, imageCount, annotationCount,
 }: ValidationResultsProps) {
+  const [confirmBulk, setConfirmBulk] = useState(false);
+  const confirmationRef = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    if (confirmBulk) confirmationRef.current?.showModal();
+  }, [confirmBulk]);
+  const resolutionNames = [...new Set(issues.filter(i => i.type === "resolution").map(i => i.filename))];
   const grouped = useMemo(() => {
     const map = new Map<ValidationIssueType, ValidationIssue[]>();
     for (const issue of issues) {
@@ -134,12 +145,26 @@ export function ValidationResults({
               Validation found {issues.length} {issues.length === 1 ? "issue" : "issues"}
             </h2>
             <p className="text-sm text-slate-500">
-              Fix all issues below, then re-upload your zip files.
+              Fix the issues below or remove invalid files to continue.
             </p>
           </div>
         </div>
       </div>
 
+      {imageCount !== undefined && <p className="mb-4 text-sm text-slate-600" aria-live="polite">Images: {imageCount} | Annotations: {annotationCount}</p>}
+      {isDeleting && <p role="status" className="mb-4 text-sm text-slate-600">Deleting files and revalidating...</p>}
+      {confirmBulk && resolutionNames.length > 0 && (
+        <dialog ref={confirmationRef} aria-labelledby="delete-resolution-title" className="max-w-md rounded-2xl bg-white p-6 shadow-xl backdrop:bg-black/40"
+          onCancel={() => setConfirmBulk(false)}>
+          <div>
+            <h2 id="delete-resolution-title" className="font-semibold text-slate-800">Delete {resolutionNames.length} resolution-error images and their matching annotation files?</h2>
+            <div className="mt-6 flex justify-end gap-3">
+              <button autoFocus onClick={() => setConfirmBulk(false)} className="rounded-lg px-4 py-2 bg-slate-100">Cancel</button>
+              <button onClick={() => { setConfirmBulk(false); void onDeleteResolutionErrors(resolutionNames); }} className="rounded-lg px-4 py-2 bg-red-600 text-white">Delete All</button>
+            </div>
+          </div>
+        </dialog>
+      )}
       <div className="space-y-4">
         {Array.from(grouped.entries()).map(([type, items]) => {
           const meta = ISSUE_META[type];
@@ -158,6 +183,11 @@ export function ValidationResults({
                   {items.length} {items.length === 1 ? "item" : "items"}
                 </span>
               </div>
+              {type === "resolution" && <div className="px-5 py-3">
+                <button disabled={isDeleting} onClick={() => setConfirmBulk(true)} className="rounded-lg bg-red-50 px-3 py-2 text-sm font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50">
+                  Delete All {resolutionNames.length} Resolution Error Files
+                </button>
+              </div>}
               <div className="divide-y divide-slate-100">
                 {items.map((item, i) => (
                   <div
@@ -172,6 +202,7 @@ export function ValidationResults({
                         {item.reason}
                       </p>
                     </div>
+                    {type === "resolution" && <button disabled={isDeleting} aria-label={`Delete ${item.filename}`} onClick={() => { void onDeleteResolutionErrors([item.filename]); }} className="rounded-lg bg-red-50 px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50">Delete</button>}
                   </div>
                 ))}
               </div>
@@ -182,6 +213,7 @@ export function ValidationResults({
 
       <div className="mt-6 flex gap-3">
         <button
+          disabled={isDeleting}
           onClick={onReset}
           className="flex-1 py-3 rounded-xl border border-slate-200 bg-white text-slate-700 font-semibold text-sm hover:bg-slate-50 transition-colors"
         >

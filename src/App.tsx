@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Layers, ArrowRight, CheckCircle2, Loader2, RotateCcw } from "lucide-react";
 import { Uploader } from "@/components/Uploader";
 import { ValidationResults } from "@/components/ValidationResults";
@@ -6,7 +6,7 @@ import { ResumePrompt } from "@/components/ResumePrompt";
 import { SplitPicker, computeSplitData } from "@/components/SplitPicker";
 import { TileViewer } from "@/components/TileViewer";
 import { FinalizationSummary, FinalizedDownload } from "@/components/FinalizationSummary";
-import { validateZipFiles } from "@/lib/validation";
+import { deleteResolutionErrors, validateZipFiles, type ValidationDataset } from "@/lib/validation";
 import { ZIP_VERSION } from "@/lib/finalization";
 import { runTiling, type TilingProgress } from "@/lib/tiling-pipeline";
 import { DEFAULT_SMALL_BOX_THRESHOLD, DEFAULT_MIN_RETAINED_PERCENTAGE, sanitizeSmallBoxThreshold, sanitizeMinRetainedPercentage } from "@/lib/tiling-settings";
@@ -44,6 +44,7 @@ type AppState =
       mode: "main";
       stage: AppStage;
       issues: ValidationIssue[];
+      dataset?: ValidationDataset;
       session: ValidatedSession | null;
       split: SplitData | null;
       tiled: TiledData | null;
@@ -55,6 +56,8 @@ type AppState =
 
 export default function App() {
   const [state, setState] = useState<AppState>({ mode: "checking" });
+  const deletingRef = useRef(false);
+  const [isDeleting, setIsDeleting] = useState(false);
   const [isValidating, setIsValidating] = useState(false);
   const [actionError, setActionError] = useState("");
 
@@ -126,6 +129,7 @@ export default function App() {
 
   const handleValidate = useCallback(async (file1: File, file2: File) => {
     setIsValidating(true);
+    setActionError("");
     try {
       const result = await validateZipFiles(file1, file2);
       if (result.session) {
@@ -145,8 +149,10 @@ export default function App() {
           finalZip: null,
         });
       } else {
+        await saveSession({ id: "current", stage: "validation-results", updatedAt: Date.now() }, null);
         setState({
           mode: "main",
+          dataset: result.dataset,
           stage: "validation-results",
           issues: result.issues,
           session: null,
@@ -167,7 +173,32 @@ export default function App() {
     }
   }, []);
 
+  const handleDeleteResolutionErrors = useCallback(async (filenames: string[]) => {
+    if (deletingRef.current || state.mode !== "main" || state.stage !== "validation-results") return;
+    deletingRef.current = true;
+    setIsDeleting(true);
+    setActionError("");
+    try {
+      const result = await deleteResolutionErrors({ dataset: state.dataset, issues: state.issues, session: state.session }, filenames);
+      const stage = result.session ? "validated" : "validation-results";
+      // One database write replaces the session and clears all derived caches.
+      // Keep the old UI/dataset intact if validation or persistence fails.
+      await saveSession({ id: "current", stage, updatedAt: Date.now() }, result.session);
+      setState({
+        mode: "main", stage, issues: result.issues, session: result.session,
+        dataset: result.session ? undefined : result.dataset,
+        split: null, tiled: null, tilingProgress: null, finalization: null, finalZip: null,
+      });
+    } catch (error) {
+      setActionError(`Deletion failed. No files were deleted. ${error instanceof Error ? error.message : "Please try again."}`);
+    } finally {
+      deletingRef.current = false;
+      setIsDeleting(false);
+    }
+  }, [state]);
+
   const handleReset = useCallback(() => {
+    setActionError("");
     setState({ mode: "main", stage: "upload", issues: [], session: null, split: null, tiled: null, tilingProgress: null, finalization: null, finalZip: null });
   }, []);
 
@@ -495,6 +526,10 @@ export default function App() {
         {stage === "validation-results" && (
           <ValidationResults
             issues={issues}
+            onDeleteResolutionErrors={handleDeleteResolutionErrors}
+            isDeleting={isDeleting}
+            imageCount={state.dataset?.images.length}
+            annotationCount={state.dataset?.annotations.length}
             onSuccess={handleReset}
             onReset={handleReset}
           />
