@@ -14,8 +14,8 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe("clipped sliver filter", () => {
   it("uses the requested default minimum side and aspect ratio", () => {
-    expect(DEFAULT_SLIVER_MIN_SIDE).toBe(25);
-    expect(DEFAULT_SLIVER_ASPECT_RATIO).toBe(6);
+    expect(DEFAULT_SLIVER_MIN_SIDE).toBe(40);
+    expect(DEFAULT_SLIVER_ASPECT_RATIO).toBe(3);
   });
   it("removes a clipped 8 x 180 vertical fragment", () => {
     expect(convert(box(40, 180, 1432))).toBeNull();

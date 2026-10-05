@@ -257,7 +257,7 @@ export default function App() {
         });
         setState((prev) =>
           prev.mode === "main"
-            ? { ...prev, stage: "tiling", split: splitData, tilingProgress: { current: 0, total: splitData.trainImages.length + splitData.validImages.length, imageName: "" } }
+            ? { ...prev, stage: "tiling", split: splitData, tiled: null, finalization: null, finalZip: null, tilingProgress: { current: 0, total: splitData.trainImages.length + splitData.validImages.length, imageName: "" } }
             : prev,
         );
 

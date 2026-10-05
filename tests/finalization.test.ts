@@ -60,3 +60,29 @@ describe("finalization validation", () => {
     await expect(computeFinalSummaryAsync(tiled, ["person"])).rejects.toThrow(/001_1\.txt, line 1: Class ID 3/);
   });
 });
+
+
+describe("export filename integrity", () => {
+  it("keeps both files when one original name already starts with the dataset prefix", async () => {
+    const names = ["one_1", "seats_one_1"];
+    const tiled: TiledData = {
+      trainImages: names.map(name => makeTiledFile(`${name}.jpg`, name)),
+      trainLabels: names.map(name => makeTiledFile(`${name}.txt`, name)),
+      validImages: [], validLabels: [], tiledAt: Date.now(),
+    };
+    const zip = await JSZip.loadAsync(await buildFinalZip(tiled, "seat", "seats"));
+    for (const name of names) {
+      expect(await zip.file(`RFDETR_seats/train/images/seats_${name}.jpg`)!.async("string")).toBe(name);
+      expect(await zip.file(`RFDETR_seats/train/labels/seats_${name}.txt`)!.async("string")).toBe(name);
+    }
+    expect(Object.values(zip.files).filter(file => !file.dir)).toHaveLength(5);
+  });
+
+  it("rejects duplicate entries in a resumed dataset rather than overwriting", async () => {
+    const tiled: TiledData = {
+      trainImages: [makeTiledFile("same.jpg", "one"), makeTiledFile("same.jpg", "two")],
+      trainLabels: [], validImages: [], validLabels: [], tiledAt: Date.now(),
+    };
+    await expect(buildFinalZip(tiled, "seat", "seats")).rejects.toThrow("Duplicate output filename");
+  });
+});

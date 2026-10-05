@@ -2,7 +2,7 @@ import JSZip from "jszip";
 import type { TiledData, TiledFile } from "./types";
 import { parseYoloText, validateYoloText } from "./tiling";
 
-export const ZIP_VERSION = 3;
+export const ZIP_VERSION = 4;
 
 export interface FinalSummary {
   totalImages: number;
@@ -42,11 +42,6 @@ export async function computeFinalSummaryAsync(
   };
 }
 
-function ensurePrefixed(name: string, prefix: string): string {
-  if (name.startsWith(prefix)) return name;
-  return `${prefix}${name}`;
-}
-
 export interface ZipBuildProgress {
   current: number;
   total: number;
@@ -83,7 +78,10 @@ export async function buildFinalZip(
   const total = allFiles.length;
   for (let i = 0; i < allFiles.length; i++) {
     const { file, target } = allFiles[i];
-    const prefixedName = ensurePrefixed(file.name, prefix);
+    // Every source name receives the prefix, including names that already
+    // start with it. Conditional prefixing aliases e.g. a.jpg and seats_a.jpg.
+    const prefixedName = `${prefix}${file.name}`;
+    if (target.file(prefixedName)) throw new Error(`Duplicate output filename: ${prefixedName}`);
     if (onProgress) {
       onProgress({ current: i, total, fileName: prefixedName });
     }

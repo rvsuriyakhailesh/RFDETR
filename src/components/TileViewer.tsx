@@ -69,21 +69,16 @@ const HANDLES = [
 ] as const;
 
 function buildEntries(tiled: TiledData): TileEntry[] {
-  const labelByName = new Map<string, TiledFile>();
-  for (const l of tiled.trainLabels) labelByName.set(l.name, l);
-  for (const l of tiled.validLabels) labelByName.set(l.name, l);
-
   const entries: TileEntry[] = [];
-
-  for (const img of tiled.trainImages) {
-    const base = img.name.replace(/\.[^.]+$/, "");
-    const label = labelByName.get(`${base}.txt`);
-    if (label) entries.push({ image: img, label, split: "train" });
-  }
-  for (const img of tiled.validImages) {
-    const base = img.name.replace(/\.[^.]+$/, "");
-    const label = labelByName.get(`${base}.txt`);
-    if (label) entries.push({ image: img, label, split: "valid" });
+  for (const split of ["train", "valid"] as const) {
+    const images = split === "train" ? tiled.trainImages : tiled.validImages;
+    const labels = split === "train" ? tiled.trainLabels : tiled.validLabels;
+    const labelByName = new Map(labels.map(label => [label.name, label]));
+    for (const image of images) {
+      const base = image.name.replace(/\.[^.]+$/, "");
+      const label = labelByName.get(`${base}.txt`);
+      if (label) entries.push({ image, label, split });
+    }
   }
 
   entries.sort((a, b) => a.image.name.localeCompare(b.image.name));
@@ -589,6 +584,9 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
     (e: React.MouseEvent) => {
       if (e.button !== 0 || labelsLoading || pendingDraw || showUnsavedDialog || saving) return;
       e.preventDefault();
+      // preventDefault keeps focus in the previous input unless we explicitly
+      // focus the canvas; otherwise editor shortcuts are treated as typing.
+      viewportRef.current?.focus({ preventScroll: true });
       if (tool === "lineSelect") {
         const rect = viewportRef.current?.getBoundingClientRect();
         if (!rect) return;
@@ -742,11 +740,11 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
   }, [copiedBoxes, labelsLoading, pendingDraw, showUnsavedDialog, saving, screenToNorm]);
 
   const undo = useCallback(() => {
-    if (!undoSnapshot) return;
+    if (!undoSnapshot || saving || pendingDraw || showUnsavedDialog || isDrawing || isLineDrawing || isMovingBox || isResizing) return;
     setLabels(undoSnapshot);
     setUndoSnapshot(null);
     setSelectedBoxes(new Set());
-  }, [undoSnapshot]);
+  }, [undoSnapshot, saving, pendingDraw, showUnsavedDialog, isDrawing, isLineDrawing, isMovingBox, isResizing]);
 
   const save = useCallback(async (): Promise<boolean> => {
     if (!entry || labelsLoading || isMovingBox || isResizing || isDrawing || isLineDrawing || pendingDraw || saving) return false;
@@ -871,6 +869,7 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
     const handler = (e: KeyboardEvent) => {
       if (e.repeat || isEditableElement(e.target) || saving || showUnsavedDialog) return;
       if (isResizing || isMovingBox) return;
+      if ((pendingDraw || isDrawing || isLineDrawing) && e.key !== "Escape") return;
       const key = e.key.toLowerCase();
       const command = e.ctrlKey || e.metaKey;
 
@@ -899,6 +898,19 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
         if (copiedBoxes.length === 0) return;
         e.preventDefault();
         pasteCopied();
+      } else if (!command && !e.altKey && e.key.startsWith("Arrow") && selectedBoxesRef.current.size > 0) {
+        e.preventDefault();
+        const image = imgRef.current;
+        if (!image?.naturalWidth || !image.naturalHeight) return;
+        const dx = e.key === "ArrowLeft" ? -1 / image.naturalWidth : e.key === "ArrowRight" ? 1 / image.naturalWidth : 0;
+        const dy = e.key === "ArrowUp" ? -1 / image.naturalHeight : e.key === "ArrowDown" ? 1 / image.naturalHeight : 0;
+        const previous = labelsRef.current;
+        const updated = moveSelectedBoxes(previous, selectedBoxesRef.current, dx, dy);
+        if (updated !== previous) {
+          setUndoSnapshot(previous);
+          setLabels(updated);
+          setCompletedLine(null);
+        }
       } else if (e.key === "ArrowLeft") {
         e.preventDefault();
         goPrev();
@@ -979,7 +991,7 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
             Click a box to select (smallest box wins on overlap, click again to
             cycle), Ctrl+click to select or deselect multiple boxes. Release
             Ctrl and drag a selected box to move the group. Drag handles to
-            resize, Ctrl+D to delete, Ctrl+C/Ctrl+V to copy and paste at the mouse,
+            resize, arrow keys to move selected boxes by 1px, Ctrl+D to delete, Ctrl+C/Ctrl+V to copy and paste at the mouse,
             Ctrl+X for line selection, Ctrl+A for the previous image, D for draw mode, Ctrl+S to save. Scroll to zoom,
             drag to pan.
           </p>
@@ -1240,6 +1252,8 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
         {/* Viewport */}
         <div
           ref={viewportRef}
+          tabIndex={0}
+          aria-label="Annotation editor canvas"
           onMouseDown={handleViewportMouseDown}
           onMouseMove={(event) => { lastMousePositionRef.current = { x: event.clientX, y: event.clientY }; }}
           onMouseLeave={() => { lastMousePositionRef.current = null; }}
@@ -1522,7 +1536,7 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
         <div className="flex flex-wrap gap-1">
           {entries.map((e, i) => (
             <button
-              key={e.image.name}
+              key={`${e.split}/${e.image.name}`}
               onClick={() => navigateTo(i)}
               title={e.image.name}
               className={`w-2.5 h-2.5 rounded-full transition-all cursor-pointer ${

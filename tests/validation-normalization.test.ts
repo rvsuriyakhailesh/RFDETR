@@ -92,4 +92,16 @@ describe("normalization at the ZIP upload boundary", () => {
     expect(result.issues).toHaveLength(2);
     expect(result.issues.every(issue => issue.type === "duplicate-filename" && issue.reason.includes("same stem '001'"))).toBe(true);
   });
+  it("rejects nonnumeric image basenames shared across extensions instead of losing a pair", async () => {
+    const result = await validateZipFiles(...await uploadedZips(["camera.jpg", "camera.png"], ["camera.txt"]));
+    expect(result.session).toBeNull();
+    expect(result.issues).toContainEqual(expect.objectContaining({ type: "duplicate-filename", filename: "camera.png" }));
+  });
+
+  it("rejects annotation stems duplicated with different extension case", async () => {
+    const result = await validateZipFiles(...await uploadedZips(["camera.jpg"], ["camera.txt", "camera.TXT"]));
+    expect(result.session).toBeNull();
+    expect(result.issues).toContainEqual(expect.objectContaining({ type: "duplicate-filename", filename: "camera.TXT" }));
+  });
+
 });

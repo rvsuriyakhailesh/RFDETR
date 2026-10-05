@@ -216,26 +216,26 @@ export async function validateDataset(dataset: ValidationDataset): Promise<Valid
 
   const seenData = new Set<string>();
   for (const name of dataNames) {
-    if (seenData.has(name)) {
+    if (seenData.has(getBaseName(name))) {
       issues.push({
         type: "duplicate-filename",
         filename: name,
-        reason: "Duplicate image filename in the 'data' folder.",
+        reason: "Duplicate image basename in the 'data' folder; each image must have its own annotation.",
       });
     }
-    seenData.add(name);
+    seenData.add(getBaseName(name));
   }
 
   const seenObj = new Set<string>();
   for (const name of objTrainNames) {
-    if (seenObj.has(name)) {
+    if (seenObj.has(getBaseName(name))) {
       issues.push({
         type: "duplicate-filename",
         filename: name,
-        reason: "Duplicate annotation filename in the 'obj_train_data' folder.",
+        reason: "Duplicate annotation basename in the 'obj_train_data' folder.",
       });
     }
-    seenObj.add(name);
+    seenObj.add(getBaseName(name));
   }
 
   const dataBaseNames = new Set(dataNames.map(getBaseName));
