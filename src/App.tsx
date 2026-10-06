@@ -8,7 +8,7 @@ import { TileViewer } from "@/components/TileViewer";
 import { FinalizationSummary, FinalizedDownload } from "@/components/FinalizationSummary";
 import { deleteResolutionErrors, validateZipFiles, type ValidationDataset } from "@/lib/validation";
 import { loadProcessedDataset } from "@/lib/processed-dataset";
-import { updateDatasetSplit } from "@/lib/dataset-items";
+import { deleteDatasetItem, updateDatasetSplit } from "@/lib/dataset-items";
 import { ZIP_VERSION } from "@/lib/finalization";
 import { runTiling, type TilingProgress } from "@/lib/tiling-pipeline";
 import { DEFAULT_SMALL_BOX_THRESHOLD, DEFAULT_MIN_RETAINED_PERCENTAGE, sanitizeSmallBoxThreshold, sanitizeMinRetainedPercentage } from "@/lib/tiling-settings";
@@ -373,6 +373,7 @@ export default function App() {
     index: number, pendingLabel?: { split: "train" | "valid"; name: string; text: string },
   ) => {
     if (state.mode !== "main" || !state.tiled) throw new Error("No dataset is open.");
+    if (state.session?.datasetType !== "processed-rfdetr") throw new Error("Editor split changes require a reopened RFDETR dataset.");
     let tiled = state.tiled;
     if (pendingLabel) {
       const key = pendingLabel.split === "train" ? "trainLabels" : "validLabels";
@@ -384,6 +385,22 @@ export default function App() {
     await saveTiled(tiled, { id: "current", stage: "tile-viewer", updatedAt: Date.now() });
     setState(prev => prev.mode === "main" ? { ...prev, tiled, finalZip: null,
       finalization: prev.finalization?.oldFoldersDeleted ? { ...prev.finalization, finalizedAt: 0 } : null } : prev);
+  }, [state]);
+
+  const handleDeleteEditorImage = useCallback(async (split: "train" | "valid", imageName: string) => {
+    if (state.mode !== "main" || !state.tiled || state.session?.datasetType !== "processed-rfdetr") {
+      throw new Error("Image deletion requires a reopened RFDETR dataset.");
+    }
+    const result = deleteDatasetItem(state.tiled, split, imageName);
+    await saveTiled(result.tiled, { id: "current", stage: "tile-viewer", updatedAt: Date.now() });
+    setState(prev => prev.mode === "main" ? { ...prev, tiled: result.tiled,
+      session: prev.session ? { ...prev.session,
+        totalImages: result.tiled.trainImages.length + result.tiled.validImages.length,
+        totalAnnotations: result.tiled.trainLabels.length + result.tiled.validLabels.length } : null,
+      finalZip: null,
+      finalization: prev.finalization?.oldFoldersDeleted ? { ...prev.finalization, finalizedAt: 0 } : null,
+    } : prev);
+    return result.warning;
   }, [state]);
 
   const handleGoToFinalization = useCallback(async () => {
@@ -740,10 +757,12 @@ export default function App() {
         {stage === "tile-viewer" && tiled && (
           <TileViewer
             tiled={tiled}
+            datasetType={session?.datasetType ?? "raw"}
             objNamesText={session?.objNames?.text ?? null}
             onBack={handleBackFromTileViewer}
             onSave={handleSaveLabel}
             onUpdateSplit={handleUpdateEditorSplit}
+            onDeleteImage={handleDeleteEditorImage}
             onFinalize={handleGoToFinalization}
           />
         )}

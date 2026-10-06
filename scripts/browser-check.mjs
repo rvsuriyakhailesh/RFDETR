@@ -49,6 +49,10 @@ async function evaluate(expression) {
 const body = () => evaluate('document.body.innerText');
 const waitText = text => until(async () => (await body()).includes(text), `Missing text: ${text}`);
 async function clickText(text) {
+  await until(() => evaluate(`(() => {
+    const button = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === ${JSON.stringify(text)});
+    return Boolean(button && !button.disabled);
+  })()`), 'Button did not become available: '+text);
   await evaluate(`(() => {
     const button = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === ${JSON.stringify(text)});
     if (!button || button.disabled) throw new Error('Button unavailable: ' + ${JSON.stringify(text)});
@@ -56,6 +60,7 @@ async function clickText(text) {
   })()`);
 }
 async function clickSelector(selector) {
+  await until(() => evaluate(`(() => { const node = document.querySelector(${JSON.stringify(selector)}); return Boolean(node && !node.disabled); })()`), 'Control did not become available: '+selector);
   await evaluate(`(() => { const node = document.querySelector(${JSON.stringify(selector)}); if (!node || node.disabled) throw new Error('Control unavailable'); node.click(); })()`);
 }
 async function key(key, modifiers = 0) {
@@ -168,6 +173,10 @@ try {
   await clickText('View Tiles');
   await until(() => evaluate(`Boolean(document.querySelector('[aria-label="Annotation editor canvas"] img')?.naturalWidth)`), 'Editor image did not decode');
   await waitText('1 annotation');
+  assert(!(await body()).includes('Delete Image'));
+  assert(!(await body()).includes('Mark as Last Train Image'));
+  assert(await evaluate(`Boolean(document.querySelector('[title="Delete selected (Del or Ctrl+D)"]'))`));
+  console.log('PASS raw editor hides image management controls and retains bounding-box Delete');
   await evaluate('document.querySelector("#editor-image-number").focus()');
   await clickImage(0.5, 0.5);
   assert.equal(await evaluate('document.activeElement.getAttribute("aria-label")'), 'Annotation editor canvas');
@@ -428,6 +437,125 @@ try {
 
   assert.equal(browserErrors.length, 0, JSON.stringify(browserErrors));
   console.log('PASS processed shortcuts, dirty split save/cancel/failure/retry, 160/34 and 120/74 assignments, resume, exact ZIP counts, unchanged pixels, cache invalidation and re-upload');
+
+  // Deletion operates only on processed items; confirm both actions are present.
+  assert((await body()).includes('Delete Image'));
+  assert((await body()).includes('Mark as Last Train Image'));
+  await clickText('Finalize'); await waitText('Finalization Summary');
+  await until(() => evaluate(`[...document.querySelectorAll('button')].some(b => b.textContent.trim() === 'Build zip' && !b.disabled)`), 'Deletion baseline summary did not finish');
+  await clickText('Build zip'); await waitText('Download RFDETR_roundtrip.zip');
+  assert.equal(await savedRecord('record.finalZip instanceof Blob'), true);
+  await clickText('Back to editor'); await waitText('3 annotations');
+  const deletedUrl = await evaluate(`document.querySelector('[aria-label="Annotation editor canvas"] img').src`);
+  await evaluate(`(() => { window.revokedImageUrls = []; const original = URL.revokeObjectURL.bind(URL); URL.revokeObjectURL = url => { window.revokedImageUrls.push(url); original(url); }; })()`);
+  await clickImage(0.5,0.5); await key('ArrowRight'); await waitText('Unsaved');
+  await clickText('Delete Image'); await waitText('Deleting the image will also discard those changes');
+  assert.equal(await evaluate(`document.querySelector('dialog[aria-label="Delete image and annotation"]').open`), true);
+  await key('d',2); assert((await body()).includes('3 annotations'));
+  await clickText('Cancel'); await waitText('Unsaved');
+  assert.equal(await savedRecord('record.session.totalImages'), 194);
+  assert.equal(await savedRecord('record.finalZip instanceof Blob'), true);
+  await clickText('Delete Image');
+  await evaluate(`(async () => { const { db } = await import('/src/lib/db.ts'); window.originalPut = db.sessions.put; db.sessions.put = async () => { throw new Error('Test image delete failure'); }; })()`);
+  await clickText('Delete'); await waitText('Test image delete failure');
+  assert.equal(await savedRecord('record.session.totalImages'), 194);
+  assert((await body()).includes('Unsaved'));
+  assert.equal(await evaluate('window.revokedImageUrls.includes('+JSON.stringify(deletedUrl)+')'), false);
+  await evaluate(`(async () => { const { db } = await import('/src/lib/db.ts'); db.sessions.put = window.originalPut; })()`);
+  await clickText('Delete'); await waitText('Train: 119 | Valid: 74');
+  await until(() => evaluate(`document.querySelector('[aria-label="Annotation editor canvas"] img')?.alt === 'roundtrip_2.png'`), 'First-image deletion must show next image');
+  await waitText('2 annotations');
+  assert.equal(await savedRecord('record.session.totalImages'), 193);
+  assert.equal(await savedRecord('record.session.totalAnnotations'), 193);
+  assert.equal(await savedRecord('record.finalZip'), null);
+  assert.equal(await savedRecord("record.tiled.trainLabels.some(label => label.name === 'roundtrip_1.txt')"), false);
+  assert.equal(await evaluate('window.revokedImageUrls.includes('+JSON.stringify(deletedUrl)+')'), true);
+  assert.equal(await evaluate(`window.revokedImageUrls.includes(document.querySelector('[aria-label="Annotation editor canvas"] img').src)`), false);
+  assert.equal(await evaluate(`document.querySelector('[title="Undo (Ctrl+Z)"]').disabled`), true);
+  assert(!(await body()).includes('box selected'));
+  console.log('PASS delete confirmation/cancel, unsaved-edit warning, storage failure/retry, cache invalidation, selection/Undo reset and object URL cleanup');
+
+  const deletedNumbers = [1];
+  async function deleteNamed(number, next, train, valid, lastTrain) {
+    await clickSelector('[title="roundtrip_'+number+'.png"]');
+    await until(() => evaluate(`document.querySelector('[aria-label="Annotation editor canvas"] img')?.alt === 'roundtrip_${number}.png'`), 'Target image did not open');
+    await delay(150);
+    await clickText('Delete Image'); await clickText('Delete');
+    await waitText('Train: '+train+' | Valid: '+valid);
+    await until(() => evaluate(`document.querySelector('[aria-label="Annotation editor canvas"] img')?.alt === 'roundtrip_${next}.png'`), 'Wrong image after deleting '+number);
+    await waitText('2 annotations');
+    assert((await body()).includes('Last Train Image: roundtrip_'+lastTrain+'.png'));
+    assert.equal(await savedRecord('record.session.totalImages'), train+valid);
+    assert.equal(await savedRecord('record.session.totalAnnotations'), train+valid);
+    assert.equal(await savedRecord("[...record.tiled.trainImages,...record.tiled.validImages].some(file => file.name === 'roundtrip_"+number+".png')"), false);
+    assert.equal(await savedRecord("[...record.tiled.trainLabels,...record.tiled.validLabels].some(file => file.name === 'roundtrip_"+number+".txt')"), false);
+    deletedNumbers.push(number);
+  }
+  await deleteNamed(50,51,118,74,120); // Train before boundary.
+  await deleteNamed(120,121,117,74,119); // Boundary removal keeps Valid unchanged.
+  await deleteNamed(150,151,117,73,119); // Valid removal.
+  await deleteNamed(194,193,117,72,119); // Last image opens previous.
+  await deleteNamed(193,192,117,71,119);
+  await deleteNamed(119,121,116,71,118);
+  await deleteNamed(180,181,116,70,118);
+  await deleteNamed(2,3,115,70,118);
+  assert((await body()).includes('1 / 185'));
+  // Split calculation uses remaining items, not the original numeric filename.
+  await clickSelector('[title="roundtrip_140.png"]'); await waitText('135 / 185'); await delay(150);
+  await clickText('Mark as Last Train Image'); await waitText('Train: 135 images | Valid: 50 images');
+  await clickText('Update Split'); await waitText('Train: 135 | Valid: 50');
+  await cdp('Page.reload'); await waitText('Resume Session'); await clickText('Resume Session');
+  await waitText('Train: 135 | Valid: 50'); await waitText('2 annotations');
+  assert.equal(await savedRecord('record.session.totalImages'),185);
+  await clickText('Finalize'); await waitText('Finalization Summary');
+  await until(() => evaluate(`[...document.querySelectorAll('button')].some(b => b.textContent.trim() === 'Build zip' && !b.disabled)`), 'Deletion summary did not finish');
+  await clickText('Build zip'); await waitText('Download RFDETR_roundtrip.zip');
+  const afterDeletionExport = await savedRecord(`await new Promise(resolve => { const r = new FileReader(); r.onload = () => resolve(r.result.split(',')[1]); r.readAsDataURL(record.finalZip); })`);
+  const afterDeletionZip = await JSZip.loadAsync(Buffer.from(afterDeletionExport, 'base64'));
+  for (const [partition, count] of [['train',135],['valid',50]]) {
+    for (const folder of ['images','labels']) assert.equal(Object.values(afterDeletionZip.files).filter(file => !file.dir && file.name.startsWith('RFDETR_roundtrip/'+partition+'/'+folder+'/')).length,count);
+  }
+  for (const number of deletedNumbers) for (const partition of ['train','valid']) {
+    assert.equal(afterDeletionZip.file('RFDETR_roundtrip/'+partition+'/images/roundtrip_'+number+'.png'),null);
+    assert.equal(afterDeletionZip.file('RFDETR_roundtrip/'+partition+'/labels/roundtrip_'+number+'.txt'),null);
+  }
+  await evaluate(`(async () => { const { clearSession } = await import('/src/lib/db.ts'); await clearSession(); })()`);
+  await cdp('Page.reload'); await waitText('Upload your zip files'); await uploadOne(afterDeletionExport);
+  await waitText('Train: 135 | Valid: 50');
+  assert.equal(await savedRecord('record.session.totalImages'),185);
+  console.log('PASS nine Train/Valid deletions, first/middle/final navigation, Train boundary preservation, split after deletion, reload/resume, 185-pair export and re-upload');
+
+  // Do not remove the only Train image; unrelated Valid items must not be reassigned.
+  await clickText('Mark as Last Train Image'); await clickText('Update Split'); await waitText('Train: 1 | Valid: 184');
+  await waitText('At least one Train image must remain');
+  assert.equal(await evaluate(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Delete Image').disabled`),true);
+  await deleteNamed(4,5,1,183,3);
+  // A damaged resumed record must remain navigable and deletable.
+  await evaluate(`(async () => {
+    const { loadSession,saveSession } = await import('/src/lib/db.ts'); const record = await loadSession();
+    const tiled = {...record.tiled,trainImages:[record.tiled.trainImages[0],record.tiled.validImages[0]],
+      trainLabels:[record.tiled.trainLabels[0]],validImages:[record.tiled.validImages[1]],validLabels:[record.tiled.validLabels[1]]};
+    await saveSession({id:'current',stage:'tile-viewer',updatedAt:Date.now()}, {...record.session,totalImages:3,totalAnnotations:2},null,tiled);
+  })()`);
+  await cdp('Page.reload'); await waitText('Resume Session'); await clickText('Resume Session');
+  await waitText('Annotation Editor');
+  await until(() => evaluate(`Boolean(document.querySelector('[aria-label="Annotation editor canvas"] img')?.naturalWidth)`), 'Damaged session did not resume');
+  await clickSelector('[title="roundtrip_5.png"]'); await waitText('The matching annotation is missing');
+  await delay(150); await clickText('Delete Image'); await clickText('Delete');
+  await waitText('Its matching annotation roundtrip_5.txt was already missing');
+  await waitText('Train: 1 | Valid: 1');
+  // Final dataset image is protected with a visible explanation.
+  await evaluate(`(async () => {
+    const { loadSession,saveSession } = await import('/src/lib/db.ts'); const record = await loadSession();
+    await saveSession({id:'current',stage:'tile-viewer',updatedAt:Date.now()}, {...record.session,totalImages:1,totalAnnotations:1},null,
+      {...record.tiled,validImages:[],validLabels:[]});
+  })()`);
+  await cdp('Page.reload'); await waitText('Resume Session'); await clickText('Resume Session');
+  await waitText('At least one image must remain in the dataset.');
+  assert.equal(await evaluate(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Delete Image').disabled`),true);
+  assert.equal(browserErrors.length,0,JSON.stringify(browserErrors));
+  console.log('PASS final Train/image protection and safe missing-annotation deletion; no browser runtime exceptions');
+
 
 } catch (error) {
   if (socket?.readyState === WebSocket.OPEN) {

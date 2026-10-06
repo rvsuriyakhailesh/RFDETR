@@ -67,7 +67,11 @@ export async function saveTiled(tiled: TiledData, meta: SessionMeta): Promise<vo
   await db.sessions.put({
     id: SESSION_ID,
     meta,
-    session: existing?.session ?? null,
+    session: existing?.session?.datasetType === "processed-rfdetr"
+      ? { ...existing.session,
+          totalImages: tiled.trainImages.length + tiled.validImages.length,
+          totalAnnotations: tiled.trainLabels.length + tiled.validLabels.length }
+      : existing?.session ?? null,
     split: existing?.split ?? null,
     tiled,
     finalization: existing?.finalization?.oldFoldersDeleted

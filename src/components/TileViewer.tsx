@@ -24,17 +24,19 @@ import {
   AlertCircle,
   CheckCircle2,
 } from "lucide-react";
-import type { TiledData } from "@/lib/types";
-import { orderedDatasetItems } from "@/lib/dataset-items";
+import type { DatasetType, TiledData } from "@/lib/types";
+import { imageDeletionBlockReason, orderedDatasetItems } from "@/lib/dataset-items";
 import { imageNumberToIndex, moveSelectedBoxes, pasteBoxesAtPosition, selectBoxesCrossedByLine, type Point } from "@/lib/editor";
 import { parseYoloText, formatYoloLine, type YoloLine, type RecomputedLine } from "@/lib/tiling";
 
 interface TileViewerProps {
   tiled: TiledData;
+  datasetType: Exclude<DatasetType, "invalid">;
   objNamesText: string | null;
   onBack: () => void;
   onSave: (split: "train" | "valid", labelName: string, text: string) => Promise<void>;
   onFinalize: () => void;
+  onDeleteImage: (split: "train" | "valid", imageName: string) => Promise<string | undefined>;
   onUpdateSplit: (index: number, pendingLabel?: { split: "train" | "valid"; name: string; text: string }) => Promise<void>;
 }
 
@@ -95,7 +97,8 @@ function isEditableElement(target: EventTarget | null): boolean {
   );
 }
 
-export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize, onUpdateSplit }: TileViewerProps) {
+export function TileViewer({ tiled, datasetType, objNamesText, onBack, onSave, onFinalize, onUpdateSplit, onDeleteImage }: TileViewerProps) {
+  const isProcessed = datasetType === "processed-rfdetr";
   const entries = useMemo(() => orderedDatasetItems(tiled), [tiled]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [imageNumber, setImageNumber] = useState("1");
@@ -127,8 +130,18 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize, on
   const [pendingTransition, setPendingTransition] = useState<Transition | null>(null);
   const [justSaved, setJustSaved] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const [deleteWarning, setDeleteWarning] = useState("");
   const [showSplitDialog, setShowSplitDialog] = useState(false);
   const [saveError, setSaveError] = useState("");
+
+  const deleteDialogRef = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const dialog = deleteDialogRef.current;
+    if (!showDeleteDialog || !dialog) return;
+    dialog.showModal();
+    return () => dialog.close();
+  }, [showDeleteDialog]);
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const fullscreenRef = useRef<HTMLDivElement>(null);
@@ -210,7 +223,11 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize, on
     });
   }, [isClassVisible, showBoxes]);
 
-  const entry = entries[currentIndex];
+  const entry = entries[Math.min(currentIndex, entries.length - 1)];
+  const deletionBlocked = entry ? imageDeletionBlockReason(tiled, entry.split) : undefined;
+  useEffect(() => {
+    setCurrentIndex(index => Math.min(index, Math.max(0, entries.length - 1)));
+  }, [entries.length]);
   const hasUnsavedChanges = useMemo(
     () => JSON.stringify(labels) !== JSON.stringify(savedLabels),
     [labels, savedLabels],
@@ -261,7 +278,7 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize, on
     setNavigationError("");
     setJustSaved(false);
     setSaveError("");
-  }, [currentIndex]);
+  }, [currentIndex, image]);
 
   useEffect(() => {
     const handler = () => {
@@ -803,12 +820,12 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize, on
   }, [onBack, onFinalize]);
 
   const requestTransition = useCallback((transition: Transition) => {
-    if (saving || showSplitDialog || isMovingBox || isResizing || isDrawing || isLineDrawing || pendingDraw || showUnsavedDialog) return;
+    if (saving || showDeleteDialog || showSplitDialog || isMovingBox || isResizing || isDrawing || isLineDrawing || pendingDraw || showUnsavedDialog) return;
     if (hasUnsavedChanges) {
       setPendingTransition(transition);
       setShowUnsavedDialog(true);
     } else finishTransition(transition);
-  }, [saving, showSplitDialog, isMovingBox, isResizing, isDrawing, isLineDrawing, pendingDraw, showUnsavedDialog, hasUnsavedChanges, finishTransition]);
+  }, [saving, showDeleteDialog, showSplitDialog, isMovingBox, isResizing, isDrawing, isLineDrawing, pendingDraw, showUnsavedDialog, hasUnsavedChanges, finishTransition]);
 
   const handleBack = useCallback(() => requestTransition({ kind: "back" }), [requestTransition]);
   const handleFinalize = useCallback(() => requestTransition({ kind: "finalize" }), [requestTransition]);
@@ -849,7 +866,7 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize, on
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.repeat || isEditableElement(e.target) || saving || showSplitDialog || showUnsavedDialog) return;
+      if (e.repeat || isEditableElement(e.target) || saving || showDeleteDialog || showSplitDialog || showUnsavedDialog) return;
       if (isResizing || isMovingBox) return;
       if ((pendingDraw || isDrawing || isLineDrawing) && e.key !== "Escape") return;
       const key = e.key.toLowerCase();
@@ -937,7 +954,7 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize, on
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [goPrev, goNext, copySelected, pasteCopied, copiedBoxes.length, deleteSelected, undo, save, toggleFullscreen, handleBack, pendingDraw, isDrawing, isLineDrawing, isDragging, showSplitDialog, showUnsavedDialog, isResizing, isMovingBox, saving, toggleTool]);
+  }, [goPrev, goNext, copySelected, pasteCopied, copiedBoxes.length, deleteSelected, undo, save, toggleFullscreen, handleBack, pendingDraw, isDrawing, isLineDrawing, isDragging, showDeleteDialog, showSplitDialog, showUnsavedDialog, isResizing, isMovingBox, saving, toggleTool]);
 
   if (entries.length === 0) {
     return (
@@ -998,6 +1015,7 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize, on
             : "bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm"
         }
       >
+        {isProcessed && <>
         <div className="flex items-center justify-between gap-3 flex-wrap px-4 py-2 border-b border-slate-100 bg-slate-50 text-xs text-slate-600">
           <span>Train: {tiled.trainImages.length} | Valid: {tiled.validImages.length} | Last Train Image: {[...entries].reverse().find(item => item.split === "train")?.image.name ?? "--"}</span>
           <button className="px-3 py-2 rounded-lg bg-slate-200 hover:bg-slate-300 disabled:opacity-40 font-medium"
@@ -1005,6 +1023,16 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize, on
             onClick={() => { setSaveError(""); setShowSplitDialog(true); }}>
             Mark as Last Train Image
           </button>
+          <button className="px-3 py-2 rounded-lg bg-red-50 text-red-700 border border-red-200 hover:bg-red-100 disabled:opacity-40 font-medium"
+            title={deletionBlocked ?? "Delete the current image and its matching annotation"}
+            disabled={Boolean(deletionBlocked) || saving || labelsLoading || showUnsavedDialog || showSplitDialog || Boolean(pendingDraw) || isMovingBox || isResizing || isDrawing || isLineDrawing}
+            onClick={() => { setSaveError(""); setShowDeleteDialog(true); }}>
+            Delete Image
+          </button>
+          {deletionBlocked && <span>{deletionBlocked}</span>}
+          {entry.missingAnnotation && <span role="status" className="text-amber-700">The matching annotation is missing. You can delete this damaged image.</span>}
+          {deleteWarning && <span role="status" className="text-amber-700">{deleteWarning}</span>}
+
         </div>
         {showSplitDialog && (
           <div role="dialog" aria-modal="true" aria-label="Update Train/Valid split" className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
@@ -1032,6 +1060,57 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize, on
             </div>
           </div>
         )}
+        {showDeleteDialog && (
+          <dialog ref={deleteDialogRef} aria-label="Delete image and annotation"
+            onCancel={event => { event.preventDefault(); if (!saving) setShowDeleteDialog(false); }}
+            className="fixed inset-0 z-50 m-auto bg-transparent p-0 max-w-sm w-11/12 backdrop:bg-black/50">
+            <div className="bg-white rounded-2xl shadow-xl p-6 max-w-sm w-full text-sm text-slate-700">
+              <h3 className="font-bold mb-3">Delete this image and its annotation permanently?</h3>
+              <p className="break-all">{entry.image.name} and {entry.label.name}</p>
+              {hasUnsavedChanges && <p className="mt-2 text-amber-700">This image has unsaved annotation changes. Deleting the image will also discard those changes.</p>}
+              {entry.missingAnnotation && <p className="mt-2 text-amber-700">The matching annotation is already missing. Only the remaining image will be removed.</p>}
+              {saveError && <p role="alert" className="mt-2 text-red-600">{saveError}</p>}
+              <div className="flex justify-end gap-2 mt-4">
+                <button disabled={saving} className="px-3 py-2 rounded-lg hover:bg-slate-100" onClick={() => setShowDeleteDialog(false)}>Cancel</button>
+                <button disabled={saving} className="px-3 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-40" onClick={async () => {
+                  setSaving(true);
+                  setSaveError("");
+                  try {
+                    const warning = await onDeleteImage(entry.split, entry.image.name);
+                    setDeleteWarning(warning ?? "");
+                    setSelectedBoxes(new Set());
+                    setUndoSnapshot(null);
+                    setCopiedBoxes([]);
+                    setDraftLine(null);
+                    setCompletedLine(null);
+                    setDrawRect(null);
+                    setPendingDraw(null);
+                    setPendingTransition(null);
+                    setShowUnsavedDialog(false);
+                    dragState.current = null;
+                    drawState.current = null;
+                    resizeState.current = null;
+                    moveBoxState.current = null;
+                    cycleState.current = null;
+                    lineStartRef.current = null;
+                    lastMousePositionRef.current = null;
+                    setIsDragging(false);
+                    setIsDrawing(false);
+                    setIsLineDrawing(false);
+                    setIsResizing(false);
+                    setIsMovingBox(false);
+                    setTool("pan");
+                    setCurrentIndex(Math.max(0, Math.min(currentIndex, entries.length - 2)));
+                    setShowDeleteDialog(false);
+                  } catch (error) {
+                    setSaveError(error instanceof Error ? error.message : "Could not delete the image. Nothing was deleted.");
+                  } finally { setSaving(false); }
+                }}>{saving ? "Deleting..." : "Delete"}</button>
+              </div>
+            </div>
+          </dialog>
+        )}
+        </>}
         {/* Toolbar */}
         <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-100 bg-slate-50 flex-wrap gap-2">
           <div className="flex items-center gap-2">
