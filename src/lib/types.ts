@@ -37,7 +37,10 @@ export interface ValidatedPair {
   annotation: AnnotationFile;
 }
 
+export type DatasetType = "raw" | "processed-rfdetr" | "invalid";
+
 export interface ValidatedSession {
+  datasetType?: Exclude<DatasetType, "invalid">;
   zipBaseName: string;
   objNames: ObjNamesFile | null;
   pairs: ValidatedPair[];
@@ -71,6 +74,8 @@ export interface TiledFile {
 }
 
 export interface TiledData {
+  /** Final output names must not receive another export prefix. */
+  preserveFilenames?: boolean;
   sliverMinSide?: number;
   sliverAspectRatio?: number;
   sliverBoxesRemoved?: { train: number; valid: number };

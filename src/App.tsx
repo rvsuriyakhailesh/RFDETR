@@ -7,6 +7,8 @@ import { SplitPicker, computeSplitData } from "@/components/SplitPicker";
 import { TileViewer } from "@/components/TileViewer";
 import { FinalizationSummary, FinalizedDownload } from "@/components/FinalizationSummary";
 import { deleteResolutionErrors, validateZipFiles, type ValidationDataset } from "@/lib/validation";
+import { loadProcessedDataset } from "@/lib/processed-dataset";
+import { updateDatasetSplit } from "@/lib/dataset-items";
 import { ZIP_VERSION } from "@/lib/finalization";
 import { runTiling, type TilingProgress } from "@/lib/tiling-pipeline";
 import { DEFAULT_SMALL_BOX_THRESHOLD, DEFAULT_MIN_RETAINED_PERCENTAGE, sanitizeSmallBoxThreshold, sanitizeMinRetainedPercentage } from "@/lib/tiling-settings";
@@ -127,10 +129,22 @@ export default function App() {
     };
   }, []);
 
-  const handleValidate = useCallback(async (file1: File, file2: File) => {
+  const handleValidate = useCallback(async (file1: File, file2?: File) => {
     setIsValidating(true);
     setActionError("");
     try {
+      if (!file2) {
+        const result = await loadProcessedDataset(file1);
+        if (result.session && result.tiled) {
+          await saveSession({ id: "current", stage: "tile-viewer", updatedAt: Date.now() }, result.session, null, result.tiled);
+          setState({ mode: "main", stage: "tile-viewer", issues: [], session: result.session,
+            split: null, tiled: result.tiled, tilingProgress: null, finalization: null, finalZip: null });
+        } else {
+          setState({ mode: "main", stage: "validation-results", issues: result.issues,
+            session: null, split: null, tiled: null, tilingProgress: null, finalization: null, finalZip: null });
+        }
+        return;
+      }
       const result = await validateZipFiles(file1, file2);
       if (result.session) {
         await saveSession(
@@ -326,7 +340,7 @@ export default function App() {
   const handleBackFromTileViewer = useCallback(() => {
     setState((prev) =>
       prev.mode === "main"
-      ? { ...prev, stage: "tiled" }
+      ? { ...prev, stage: prev.session?.datasetType === "processed-rfdetr" ? "upload" : "tiled" }
       : prev,
     );
   }, []);
@@ -354,6 +368,23 @@ export default function App() {
     },
     [state],
   );
+
+  const handleUpdateEditorSplit = useCallback(async (
+    index: number, pendingLabel?: { split: "train" | "valid"; name: string; text: string },
+  ) => {
+    if (state.mode !== "main" || !state.tiled) throw new Error("No dataset is open.");
+    let tiled = state.tiled;
+    if (pendingLabel) {
+      const key = pendingLabel.split === "train" ? "trainLabels" : "validLabels";
+      if (!tiled[key].some(label => label.name === pendingLabel.name)) throw new Error("Annotation not found.");
+      tiled = { ...tiled, [key]: tiled[key].map(label => label.name === pendingLabel.name
+        ? { ...label, blob: new Blob([pendingLabel.text], { type: "text/plain" }) } : label) };
+    }
+    tiled = updateDatasetSplit(tiled, index);
+    await saveTiled(tiled, { id: "current", stage: "tile-viewer", updatedAt: Date.now() });
+    setState(prev => prev.mode === "main" ? { ...prev, tiled, finalZip: null,
+      finalization: prev.finalization?.oldFoldersDeleted ? { ...prev.finalization, finalizedAt: 0 } : null } : prev);
+  }, [state]);
 
   const handleGoToFinalization = useCallback(async () => {
     setState((prev) => prev.mode === "main" ? { ...prev, stage: "finalizing" } : prev);
@@ -502,7 +533,7 @@ export default function App() {
                 Upload your zip files
               </h2>
               <p className="text-sm text-slate-500 max-w-lg mx-auto">
-                Provide two zip files whose names differ only by a{" "}
+                Reopen one downloaded RFDETR ZIP directly in the editor, or provide two raw zip files whose names differ only by a{" "}
                 <code className="text-xs bg-slate-100 px-1.5 py-0.5 rounded font-mono">
                   _backup
                 </code>{" "}
@@ -712,6 +743,7 @@ export default function App() {
             objNamesText={session?.objNames?.text ?? null}
             onBack={handleBackFromTileViewer}
             onSave={handleSaveLabel}
+            onUpdateSplit={handleUpdateEditorSplit}
             onFinalize={handleGoToFinalization}
           />
         )}

@@ -24,7 +24,8 @@ import {
   AlertCircle,
   CheckCircle2,
 } from "lucide-react";
-import type { TiledData, TiledFile } from "@/lib/types";
+import type { TiledData } from "@/lib/types";
+import { orderedDatasetItems } from "@/lib/dataset-items";
 import { imageNumberToIndex, moveSelectedBoxes, pasteBoxesAtPosition, selectBoxesCrossedByLine, type Point } from "@/lib/editor";
 import { parseYoloText, formatYoloLine, type YoloLine, type RecomputedLine } from "@/lib/tiling";
 
@@ -34,12 +35,7 @@ interface TileViewerProps {
   onBack: () => void;
   onSave: (split: "train" | "valid", labelName: string, text: string) => Promise<void>;
   onFinalize: () => void;
-}
-
-interface TileEntry {
-  image: TiledFile;
-  label: TiledFile;
-  split: "train" | "valid";
+  onUpdateSplit: (index: number, pendingLabel?: { split: "train" | "valid"; name: string; text: string }) => Promise<void>;
 }
 
 interface Transform {
@@ -67,23 +63,6 @@ const HANDLES = [
   { id: "sw", left: "0%", top: "100%", cursor: "nesw-resize" },
   { id: "w", left: "0%", top: "50%", cursor: "ew-resize" },
 ] as const;
-
-function buildEntries(tiled: TiledData): TileEntry[] {
-  const entries: TileEntry[] = [];
-  for (const split of ["train", "valid"] as const) {
-    const images = split === "train" ? tiled.trainImages : tiled.validImages;
-    const labels = split === "train" ? tiled.trainLabels : tiled.validLabels;
-    const labelByName = new Map(labels.map(label => [label.name, label]));
-    for (const image of images) {
-      const base = image.name.replace(/\.[^.]+$/, "");
-      const label = labelByName.get(`${base}.txt`);
-      if (label) entries.push({ image, label, split });
-    }
-  }
-
-  entries.sort((a, b) => a.image.name.localeCompare(b.image.name));
-  return entries;
-}
 
 const CLASS_COLORS = [
   "#ef4444",
@@ -116,8 +95,8 @@ function isEditableElement(target: EventTarget | null): boolean {
   );
 }
 
-export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: TileViewerProps) {
-  const entries = useMemo(() => buildEntries(tiled), [tiled]);
+export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize, onUpdateSplit }: TileViewerProps) {
+  const entries = useMemo(() => orderedDatasetItems(tiled), [tiled]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [imageNumber, setImageNumber] = useState("1");
   const [navigationError, setNavigationError] = useState("");
@@ -148,6 +127,7 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
   const [pendingTransition, setPendingTransition] = useState<Transition | null>(null);
   const [justSaved, setJustSaved] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [showSplitDialog, setShowSplitDialog] = useState(false);
   const [saveError, setSaveError] = useState("");
 
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -236,15 +216,17 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
     [labels, savedLabels],
   );
 
+  const image = entry?.image;
+  const label = entry?.label;
   useEffect(() => {
-    if (!entry) return;
+    if (!image || !label) return;
     let cancelled = false;
     setLabelsLoading(true);
     setLabels([]);
     setSavedLabels([]);
-    const url = URL.createObjectURL(entry.image.blob);
+    const url = URL.createObjectURL(image.blob);
     setImageUrl(url);
-    entry.label.blob.text().then((text) => {
+    label.blob.text().then((text) => {
       if (cancelled) return;
       const parsed = parseYoloText(text);
       setLabels(parsed);
@@ -252,8 +234,8 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
       setLabelsLoading(false);
     }).catch((error) => {
       if (!cancelled) setNavigationError(error instanceof Error
-        ? `${entry.label.name}: ${error.message}`
-        : `Could not load ${entry.label.name}.`);
+        ? `${label.name}: ${error.message}`
+        : `Could not load ${label.name}.`);
     });
     setSelectedBoxes(new Set());
     setUndoSnapshot(null);
@@ -271,7 +253,7 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
       cancelled = true;
       URL.revokeObjectURL(url);
     };
-  }, [entry]);
+  }, [image, label]);
 
   useEffect(() => {
     setTransform(RESET_TRANSFORM);
@@ -821,12 +803,12 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
   }, [onBack, onFinalize]);
 
   const requestTransition = useCallback((transition: Transition) => {
-    if (saving || isMovingBox || isResizing || isDrawing || isLineDrawing || pendingDraw || showUnsavedDialog) return;
+    if (saving || showSplitDialog || isMovingBox || isResizing || isDrawing || isLineDrawing || pendingDraw || showUnsavedDialog) return;
     if (hasUnsavedChanges) {
       setPendingTransition(transition);
       setShowUnsavedDialog(true);
     } else finishTransition(transition);
-  }, [saving, isMovingBox, isResizing, isDrawing, isLineDrawing, pendingDraw, showUnsavedDialog, hasUnsavedChanges, finishTransition]);
+  }, [saving, showSplitDialog, isMovingBox, isResizing, isDrawing, isLineDrawing, pendingDraw, showUnsavedDialog, hasUnsavedChanges, finishTransition]);
 
   const handleBack = useCallback(() => requestTransition({ kind: "back" }), [requestTransition]);
   const handleFinalize = useCallback(() => requestTransition({ kind: "finalize" }), [requestTransition]);
@@ -867,7 +849,7 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.repeat || isEditableElement(e.target) || saving || showUnsavedDialog) return;
+      if (e.repeat || isEditableElement(e.target) || saving || showSplitDialog || showUnsavedDialog) return;
       if (isResizing || isMovingBox) return;
       if ((pendingDraw || isDrawing || isLineDrawing) && e.key !== "Escape") return;
       const key = e.key.toLowerCase();
@@ -955,7 +937,7 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [goPrev, goNext, copySelected, pasteCopied, copiedBoxes.length, deleteSelected, undo, save, toggleFullscreen, handleBack, pendingDraw, isDrawing, isLineDrawing, isDragging, showUnsavedDialog, isResizing, isMovingBox, saving, toggleTool]);
+  }, [goPrev, goNext, copySelected, pasteCopied, copiedBoxes.length, deleteSelected, undo, save, toggleFullscreen, handleBack, pendingDraw, isDrawing, isLineDrawing, isDragging, showSplitDialog, showUnsavedDialog, isResizing, isMovingBox, saving, toggleTool]);
 
   if (entries.length === 0) {
     return (
@@ -987,14 +969,6 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
       <div className="flex items-center justify-between mb-4">
         <div>
           <h2 className="text-xl font-bold text-slate-800">Annotation Editor</h2>
-          <p className="text-sm text-slate-500 mt-1">
-            Click a box to select (smallest box wins on overlap, click again to
-            cycle), Ctrl+click to select or deselect multiple boxes. Release
-            Ctrl and drag a selected box to move the group. Drag handles to
-            resize, arrow keys to move selected boxes by 1px, Ctrl+D to delete, Ctrl+C/Ctrl+V to copy and paste at the mouse,
-            Ctrl+X for line selection, Ctrl+A for the previous image, D for draw mode, Ctrl+S to save. Scroll to zoom,
-            drag to pan.
-          </p>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -1024,6 +998,40 @@ export function TileViewer({ tiled, objNamesText, onBack, onSave, onFinalize }: 
             : "bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm"
         }
       >
+        <div className="flex items-center justify-between gap-3 flex-wrap px-4 py-2 border-b border-slate-100 bg-slate-50 text-xs text-slate-600">
+          <span>Train: {tiled.trainImages.length} | Valid: {tiled.validImages.length} | Last Train Image: {[...entries].reverse().find(item => item.split === "train")?.image.name ?? "--"}</span>
+          <button className="px-3 py-2 rounded-lg bg-slate-200 hover:bg-slate-300 disabled:opacity-40 font-medium"
+            disabled={saving || labelsLoading || showUnsavedDialog || Boolean(pendingDraw) || isMovingBox || isResizing || isDrawing || isLineDrawing}
+            onClick={() => { setSaveError(""); setShowSplitDialog(true); }}>
+            Mark as Last Train Image
+          </button>
+        </div>
+        {showSplitDialog && (
+          <div role="dialog" aria-modal="true" aria-label="Update Train/Valid split" className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+            <div className="bg-white rounded-2xl shadow-xl p-6 max-w-sm w-full mx-4 text-sm text-slate-700">
+              <h3 className="font-bold mb-3">Set this image as the last Train image?</h3>
+              <p>Train: {currentIndex + 1} images | Valid: {entries.length - currentIndex - 1} images</p>
+              {hasUnsavedChanges && <p className="mt-2">Your unsaved annotations will be saved with this split update.</p>}
+              {saveError && <p role="alert" className="mt-2 text-red-600">{saveError}</p>}
+              <div className="flex justify-end gap-2 mt-4">
+                <button disabled={saving} className="px-3 py-2 rounded-lg hover:bg-slate-100" onClick={() => setShowSplitDialog(false)}>Cancel</button>
+                <button disabled={saving} className="px-3 py-2 rounded-lg bg-slate-900 text-white disabled:opacity-40" onClick={async () => {
+                  setSaving(true);
+                  setSaveError("");
+                  try {
+                    await onUpdateSplit(currentIndex, hasUnsavedChanges ? {
+                      split: entry.split, name: entry.label.name, text: labelsToText(labelsRef.current),
+                    } : undefined);
+                    setSavedLabels(labelsRef.current);
+                    setShowSplitDialog(false);
+                  } catch (error) {
+                    setSaveError(error instanceof Error ? error.message : "Could not update split.");
+                  } finally { setSaving(false); }
+                }}>{saving ? "Saving..." : "Update Split"}</button>
+              </div>
+            </div>
+          </div>
+        )}
         {/* Toolbar */}
         <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-100 bg-slate-50 flex-wrap gap-2">
           <div className="flex items-center gap-2">

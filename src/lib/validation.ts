@@ -51,7 +51,7 @@ function stripFolder(path: string, folder: string): string {
   return normalized;
 }
 
-function getImageDimensions(blob: Blob): Promise<{ width: number; height: number }> {
+export function getImageDimensions(blob: Blob): Promise<{ width: number; height: number }> {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(blob);
     const img = new Image();

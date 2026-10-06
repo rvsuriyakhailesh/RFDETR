@@ -3,7 +3,7 @@ import { UploadCloud, FileArchive, X, Loader2 } from "lucide-react";
 import { formatSize } from "@/lib/format-size";
 
 interface UploaderProps {
-  onValidate: (file1: File, file2: File) => Promise<void>;
+  onValidate: (file1: File, file2?: File) => Promise<void>;
   isValidating: boolean;
 }
 
@@ -23,7 +23,7 @@ export function Uploader({ onValidate, isValidating }: UploaderProps) {
       return;
     }
     if (zips.length > 2) {
-      setError("Please select exactly two zip files.");
+      setError("Select one downloaded RFDETR ZIP or two raw ZIP files.");
       return;
     }
     setError(null);
@@ -41,8 +41,8 @@ export function Uploader({ onValidate, isValidating }: UploaderProps) {
   );
 
   const handleValidate = useCallback(async () => {
-    if (files.length !== 2) {
-      setError("Exactly two zip files are required.");
+    if (files.length === 0 || files.length > 2) {
+      setError("Select one downloaded RFDETR ZIP or two raw ZIP files.");
       return;
     }
     await onValidate(files[0], files[1]);
@@ -89,7 +89,7 @@ export function Uploader({ onValidate, isValidating }: UploaderProps) {
           </div>
           <div>
             <p className="text-lg font-semibold text-slate-800">
-              Drop two zip files here
+              Drop a downloaded RFDETR ZIP or two raw ZIP files here
             </p>
             <p className="text-sm text-slate-500 mt-1">
               One <code className="text-slate-600 font-mono text-xs bg-slate-100 px-1.5 py-0.5 rounded">_backup.zip</code> with images in <span className="font-medium">data/</span>, and one without <span className="font-medium">_backup</span> with annotations in <span className="font-medium">obj_train_data/</span>
@@ -133,7 +133,7 @@ export function Uploader({ onValidate, isValidating }: UploaderProps) {
 
           <button
             onClick={handleValidate}
-            disabled={files.length !== 2 || isValidating}
+            disabled={files.length === 0 || isValidating}
             className="w-full py-3.5 rounded-xl bg-slate-900 text-white font-semibold text-sm hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
           >
             {isValidating ? (

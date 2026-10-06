@@ -306,6 +306,129 @@ try {
   await waitText('2 annotations');
   assert.equal(browserErrors.length, 0, JSON.stringify(browserErrors));
   console.log('PASS same-named train/valid tiles load their own annotations');
+
+  // Reopen an actual app export through the one-file uploader.
+  async function uploadOne(base64) {
+    await evaluate(`(() => {
+      const dt = new DataTransfer();
+      dt.items.add(new File([Uint8Array.from(atob(${JSON.stringify(base64)}), c => c.charCodeAt(0))], 'arbitrary-name.zip'));
+      const input = document.querySelector('input[type=file]'); input.files = dt.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await clickText('Validate Files');
+    await waitText('Annotation Editor');
+    await until(() => evaluate(`Boolean(document.querySelector('[aria-label="Annotation editor canvas"] img')?.naturalWidth)`), 'Reopened image did not decode');
+    await delay(150);
+    assert(!(await body()).includes('Choose Train/Valid Split'));
+    assert(!(await body()).includes('Tiling images'));
+  }
+  await evaluate(`(async () => { const { clearSession } = await import('/src/lib/db.ts'); await clearSession(); })()`);
+  await cdp('Page.reload'); await waitText('Upload your zip files');
+  await uploadOne(zipBase64);
+  assert.equal(await savedRecord('record.session.datasetType'), 'processed-rfdetr');
+  assert.equal(await savedRecord('record.split'), null);
+  assert.equal(await savedRecord('record.tiled.trainImages.length + record.tiled.validImages.length'), 4);
+  assert.equal(await savedRecord('record.tiled.trainImages[0].name'), 'seats_valid train_1.jpg');
+  await waitText('0 annotations');
+  console.log('PASS actual raw export reopens directly through upload, preserves names, assignments and saved annotations');
+
+  // A 194-image real PNG fixture exported by the same generator.
+  console.log('Preparing 194-image processed fixture');
+  const largeZip = await evaluate(`(async () => {
+    const { buildFinalZip } = await import('/src/lib/finalization.ts');
+    const pixels = new Blob([Uint8Array.from(atob(${JSON.stringify(pngs.bad)}), c => c.charCodeAt(0))], { type: 'image/png' });
+    const imageFiles = Array.from({length:194}, (_, i) => ({name:(i+1)+'.png', blob:pixels}));
+    const labelBlob = new Blob(['0 0.5 0.5 0.2 0.2\\n1 0.8 0.8 0.1 0.1']);
+    const labelFiles = imageFiles.map(file => ({name:file.name.replace('.png','.txt'), blob:labelBlob}));
+    const zip = await buildFinalZip({trainImages:imageFiles.slice(0,150), trainLabels:labelFiles.slice(0,150),
+      validImages:imageFiles.slice(150), validLabels:labelFiles.slice(150), tiledAt:Date.now()}, 'Man\\nChair', 'roundtrip');
+    return new Promise(resolve => { const r = new FileReader(); r.onload = () => resolve(r.result.split(',')[1]); r.readAsDataURL(zip); });
+  })()`);
+  await evaluate(`(async () => { const { clearSession } = await import('/src/lib/db.ts'); await clearSession(); })()`);
+  await cdp('Page.reload'); await waitText('Upload your zip files');
+  console.log('Uploading 194-image processed fixture');
+  await uploadOne(largeZip);
+  await waitText('Train: 150 | Valid: 44');
+  const originalPixels = await savedRecord(`await new Promise(resolve => { const r = new FileReader(); r.onload = () => resolve(r.result); r.readAsDataURL(record.tiled.trainImages[0].blob); })`);
+  // Existing editor shortcuts must also work for processed datasets.
+  await clickSelector('[aria-label="Hide Man boxes"]'); await clickSelector('[aria-label="Show Man boxes"]');
+  await clickSelector('[aria-label="Hide Chair boxes"]'); await clickSelector('[aria-label="Show Chair boxes"]');
+  await clickSelector('[aria-label="Toggle visibility of all boxes"]'); await clickSelector('[aria-label="Toggle visibility of all boxes"]');
+  await clickSelector('[title="Zoom in"]'); await clickSelector('[title="Zoom out"]');
+  await clickSelector('[title="Next"]'); await waitText('2 / 194'); await delay(150);
+  await clickSelector('[title="Previous"]'); await waitText('1 / 194'); await delay(150);
+  await clickImage(0.5,0.5); await drag(0.5,0.5,0.55,0.55); await waitText('Unsaved'); await key('z',2);
+  await clickImage(0.5,0.5);
+  const handle = await evaluate(`(() => { const n = document.querySelector('[style*="cursor: nwse-resize"]'); const r = n.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2}; })()`);
+  await mouse(handle.x,handle.y,'mousePressed',{button:'left',clickCount:1});
+  await mouse(handle.x-10,handle.y-10,'mouseMoved',{button:'left',buttons:1});
+  await mouse(handle.x-10,handle.y-10,'mouseReleased',{button:'left',clickCount:1});
+  await waitText('Unsaved'); await key('z',2);
+  await clickImage(0.5,0.5); await clickSelector('[title="Delete selected (Del or Ctrl+D)"]');
+  await waitText('1 annotation'); await key('z',2); await waitText('2 annotations');
+
+  await clickImage(0.5, 0.5); await key('ArrowRight'); await key('z', 2);
+  await clickImage(0.5, 0.5); await key('c', 2); const processedPaste = await point(0.3, 0.3);
+  await mouse(processedPaste.x, processedPaste.y, 'mouseMoved'); await key('v', 2);
+  await waitText('3 annotations'); await key('z', 2); await waitText('2 annotations');
+  await key('x', 2); await drag(0.2, 0.5, 0.7, 0.5); await key('d', 2);
+  await waitText('1 annotation'); await key('z', 2); await waitText('2 annotations');
+  await key('d'); await drag(0.1, 0.1, 0.2, 0.2); await waitText('Assign a class');
+  await clickText('Mancls 0'); await waitText('3 annotations'); await key('d');
+  // Dirty edits and split update commit together, including on storage failure.
+  await clickText('Mark as Last Train Image'); await waitText('Your unsaved annotations will be saved');
+  await key('d', 2); assert((await body()).includes('3 annotations'));
+  await clickText('Cancel'); assert((await body()).includes('Unsaved'));
+  await clickText('Mark as Last Train Image');
+  await evaluate(`(async () => { const { db } = await import('/src/lib/db.ts'); window.originalPut = db.sessions.put; db.sessions.put = async () => { throw new Error('Test split save failure'); }; })()`);
+  await clickText('Update Split'); await waitText('Test split save failure');
+  assert.equal(await savedRecord('record.tiled.trainImages.length'), 150);
+  assert((await body()).includes('3 annotations'));
+  await evaluate(`(async () => { const { db } = await import('/src/lib/db.ts'); db.sessions.put = window.originalPut; })()`);
+  await clickText('Update Split'); await waitText('Train: 1 | Valid: 193');
+  assert.equal(await savedRecord("(await record.tiled.trainLabels[0].blob.text()).split('\\n').length"), 3);
+  async function jump(number) {
+    await evaluate(`(() => { const input = document.querySelector('#editor-image-number');
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, ${JSON.stringify(String(number))});
+      input.dispatchEvent(new Event('input', { bubbles:true })); input.closest('form').requestSubmit(); })()`);
+    await waitText(number + ' / 194'); await delay(150);
+  }
+  await jump(160); await clickText('Mark as Last Train Image'); await clickText('Update Split');
+  await waitText('Train: 160 | Valid: 34');
+  await jump(120); await clickText('Mark as Last Train Image'); await clickText('Update Split');
+  await waitText('Train: 120 | Valid: 74');
+  assert((await body()).includes('Last Train Image: roundtrip_120.png'));
+  await cdp('Page.reload'); await waitText('Resume Session'); await clickText('Resume Session');
+  await waitText('Train: 120 | Valid: 74'); await waitText('3 annotations');
+  assert.equal(await savedRecord(`await new Promise(resolve => { const r = new FileReader(); r.onload = () => resolve(r.result); r.readAsDataURL(record.tiled.trainImages[0].blob); })`), originalPixels);
+  await clickText('Finalize'); await waitText('Finalization Summary');
+  await until(() => evaluate(`[...document.querySelectorAll('button')].some(b => b.textContent.trim() === 'Build zip' && !b.disabled)`), 'Summary did not finish loading');
+  await clickText('Build zip');
+  await waitText('Download RFDETR_roundtrip.zip');
+  const reopenedExport = await savedRecord(`await new Promise(resolve => { const r = new FileReader(); r.onload = () => resolve(r.result.split(',')[1]); r.readAsDataURL(record.finalZip); })`);
+  const reopenedZip = await JSZip.loadAsync(Buffer.from(reopenedExport, 'base64'));
+  for (const [partition, count] of [['train',120],['valid',74]]) {
+    for (const folder of ['images','labels']) assert.equal(Object.values(reopenedZip.files).filter(file => !file.dir && file.name.startsWith('RFDETR_roundtrip/'+partition+'/'+folder+'/')).length, count);
+  }
+  assert.equal((await reopenedZip.file('RFDETR_roundtrip/train/labels/roundtrip_1.txt').async('string')).split('\n').length, 3);
+  await clickText('Back to editor'); await waitText('Train: 120 | Valid: 74');
+  await jump(140); await clickText('Mark as Last Train Image'); await clickText('Update Split');
+  await waitText('Train: 140 | Valid: 54'); assert.equal(await savedRecord('record.finalZip'), null);
+  // Re-upload exported output and ensure it does not gain another filename prefix.
+  await evaluate(`(async () => { const { clearSession } = await import('/src/lib/db.ts'); await clearSession(); })()`);
+  await cdp('Page.reload'); await waitText('Upload your zip files'); await uploadOne(reopenedExport);
+  await waitText('Train: 120 | Valid: 74'); await waitText('3 annotations');
+  assert.equal(await savedRecord('record.tiled.trainImages[0].name'), 'roundtrip_1.png');
+  const panBefore = await evaluate(`document.querySelector('[aria-label="Annotation editor canvas"] img').parentElement.style.transform`);
+  await drag(0.05,0.05,0.1,0.1);
+  const panAfter = await evaluate(`document.querySelector('[aria-label="Annotation editor canvas"] img').parentElement.style.transform`);
+  assert.notEqual(panAfter, panBefore);
+  await key('f'); await until(() => evaluate('Boolean(document.fullscreenElement)'), 'Fullscreen did not open');
+  await key('f'); await until(() => evaluate('!document.fullscreenElement'), 'Fullscreen did not close');
+
+  assert.equal(browserErrors.length, 0, JSON.stringify(browserErrors));
+  console.log('PASS processed shortcuts, dirty split save/cancel/failure/retry, 160/34 and 120/74 assignments, resume, exact ZIP counts, unchanged pixels, cache invalidation and re-upload');
+
 } catch (error) {
   if (socket?.readyState === WebSocket.OPEN) {
     console.error('PAGE:', await body().catch(() => 'unavailable'));

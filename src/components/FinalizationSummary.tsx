@@ -241,7 +241,7 @@ export function FinalizationSummary({
               <p className="text-sm text-slate-500 mt-1">
                 Remove stored source images and full-resolution train/valid split copies
                 from browser storage. Tiled images and any existing final ZIP remain available.
-                After cleanup, changing the train/valid split requires a new upload.
+                Editor split changes remain available. Rebuilding tiles from source requires a new upload.
               </p>
               {oldFoldersDeleted ? (
                 <div className="mt-3 flex items-center gap-2 text-sm text-green-600 font-medium">

@@ -78,9 +78,9 @@ export async function buildFinalZip(
   const total = allFiles.length;
   for (let i = 0; i < allFiles.length; i++) {
     const { file, target } = allFiles[i];
-    // Every source name receives the prefix, including names that already
-    // start with it. Conditional prefixing aliases e.g. a.jpg and seats_a.jpg.
-    const prefixedName = `${prefix}${file.name}`;
+    // Raw source names always receive the prefix to avoid aliasing names.
+    // Reopened output names are already final and must be preserved exactly.
+    const prefixedName = tiled.preserveFilenames ? file.name : `${prefix}${file.name}`;
     if (target.file(prefixedName)) throw new Error(`Duplicate output filename: ${prefixedName}`);
     if (onProgress) {
       onProgress({ current: i, total, fileName: prefixedName });
