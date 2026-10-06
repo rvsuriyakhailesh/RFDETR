@@ -1,5 +1,5 @@
 import Dexie, { type Table } from "dexie";
-import type { ValidatedSession, SessionMeta, SplitData, TiledData, FinalizationState } from "./types";
+import type { ValidatedSession, SessionMeta, SplitData, TiledData, FinalizationState, ProcessedDatasetDraft } from "./types";
 
 export interface SessionRecord {
   id: string;
@@ -9,6 +9,7 @@ export interface SessionRecord {
   tiled: TiledData | null;
   finalization: FinalizationState | null;
   finalZip: Blob | null;
+  processedDraft?: ProcessedDatasetDraft;
 }
 
 const DB_NAME = "rfdetr-pipeline";
@@ -47,6 +48,13 @@ export async function saveSession(
     finalization: null,
     finalZip: null,
   });
+}
+
+/** Validation drafts are persisted separately from validated editor sessions. */
+export async function saveProcessedDraft(processedDraft: ProcessedDatasetDraft): Promise<void> {
+  await db.sessions.put({ id: SESSION_ID,
+    meta: { id: SESSION_ID, stage: "validation-results", updatedAt: Date.now() },
+    session: null, split: null, tiled: null, finalization: null, finalZip: null, processedDraft });
 }
 
 export async function saveSplit(split: SplitData, meta: SessionMeta): Promise<void> {

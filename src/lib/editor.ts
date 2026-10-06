@@ -1,4 +1,11 @@
-import type { YoloLine } from "./tiling";
+import { formatYoloLine, type YoloLine } from "./tiling";
+
+/** Keep raw export formatting; reopened annotations retain all coordinate precision. */
+export function serializeEditorLabels(labels: YoloLine[], preservePrecision = false): string {
+  return labels.map(label => preservePrecision
+    ? [label.cls, label.xCenter, label.yCenter, label.width, label.height].join(" ")
+    : formatYoloLine(label)).join("\n");
+}
 
 export interface Point { x: number; y: number }
 export interface Rect { left: number; top: number; right: number; bottom: number }

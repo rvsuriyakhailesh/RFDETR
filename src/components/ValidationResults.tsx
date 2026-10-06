@@ -19,6 +19,8 @@ interface ValidationResultsProps {
   isDeleting: boolean;
   imageCount?: number;
   annotationCount?: number;
+  onFixBoundaryBoxes?: (issues: ValidationIssue[]) => Promise<void>;
+  isRepairing?: boolean;
 }
 
 const ISSUE_META: Record<
@@ -80,6 +82,7 @@ export function ValidationResults({
   onSuccess,
   onReset,
   onDeleteResolutionErrors, isDeleting, imageCount, annotationCount,
+  onFixBoundaryBoxes, isRepairing = false,
 }: ValidationResultsProps) {
   const [confirmBulk, setConfirmBulk] = useState(false);
   const confirmationRef = useRef<HTMLDialogElement>(null);
@@ -87,6 +90,8 @@ export function ValidationResults({
     if (confirmBulk) confirmationRef.current?.showModal();
   }, [confirmBulk]);
   const resolutionNames = [...new Set(issues.filter(i => i.type === "resolution").map(i => i.filename))];
+  const boundaryIssues = issues.filter(issue => issue.code === "box-out-of-bounds");
+  const busy = isDeleting || isRepairing;
   const grouped = useMemo(() => {
     const map = new Map<ValidationIssueType, ValidationIssue[]>();
     for (const issue of issues) {
@@ -153,6 +158,13 @@ export function ValidationResults({
 
       {imageCount !== undefined && <p className="mb-4 text-sm text-slate-600" aria-live="polite">Images: {imageCount} | Annotations: {annotationCount}</p>}
       {isDeleting && <p role="status" className="mb-4 text-sm text-slate-600">Deleting files and revalidating...</p>}
+      {isRepairing && <p role="status" className="mb-4 text-sm text-slate-600">Repairing annotations and revalidating...</p>}
+      {onFixBoundaryBoxes && boundaryIssues.length > 0 && <div className="mb-4">
+        <button disabled={busy} onClick={() => { void onFixBoundaryBoxes(boundaryIssues); }}
+          className="rounded-lg bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-50">
+          Fix All {boundaryIssues.length} Boundary {boundaryIssues.length === 1 ? "Box" : "Boxes"}
+        </button>
+      </div>}
       {confirmBulk && resolutionNames.length > 0 && (
         <dialog ref={confirmationRef} aria-labelledby="delete-resolution-title" className="max-w-md rounded-2xl bg-white p-6 shadow-xl backdrop:bg-black/40"
           onCancel={() => setConfirmBulk(false)}>
@@ -184,7 +196,7 @@ export function ValidationResults({
                 </span>
               </div>
               {type === "resolution" && <div className="px-5 py-3">
-                <button disabled={isDeleting} onClick={() => setConfirmBulk(true)} className="rounded-lg bg-red-50 px-3 py-2 text-sm font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50">
+                <button disabled={busy} onClick={() => setConfirmBulk(true)} className="rounded-lg bg-red-50 px-3 py-2 text-sm font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50">
                   Delete All {resolutionNames.length} Resolution Error Files
                 </button>
               </div>}
@@ -202,7 +214,11 @@ export function ValidationResults({
                         {item.reason}
                       </p>
                     </div>
-                    {type === "resolution" && <button disabled={isDeleting} aria-label={`Delete ${item.filename}`} onClick={() => { void onDeleteResolutionErrors([item.filename]); }} className="rounded-lg bg-red-50 px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50">Delete</button>}
+                    {onFixBoundaryBoxes && item.code === "box-out-of-bounds" && <button disabled={busy}
+                      aria-label={`Fix Box ${item.filename} Line ${item.lineNumber}`}
+                      onClick={() => { void onFixBoundaryBoxes([item]); }}
+                      className="rounded-lg bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-50">Fix Box</button>}
+                    {type === "resolution" && <button disabled={busy} aria-label={`Delete ${item.filename}`} onClick={() => { void onDeleteResolutionErrors([item.filename]); }} className="rounded-lg bg-red-50 px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50">Delete</button>}
                   </div>
                 ))}
               </div>
@@ -213,7 +229,7 @@ export function ValidationResults({
 
       <div className="mt-6 flex gap-3">
         <button
-          disabled={isDeleting}
+          disabled={busy}
           onClick={onReset}
           className="flex-1 py-3 rounded-xl border border-slate-200 bg-white text-slate-700 font-semibold text-sm hover:bg-slate-50 transition-colors"
         >

@@ -26,8 +26,8 @@ import {
 } from "lucide-react";
 import type { DatasetType, TiledData } from "@/lib/types";
 import { imageDeletionBlockReason, orderedDatasetItems } from "@/lib/dataset-items";
-import { imageNumberToIndex, moveSelectedBoxes, pasteBoxesAtPosition, selectBoxesCrossedByLine, type Point } from "@/lib/editor";
-import { parseYoloText, formatYoloLine, type YoloLine, type RecomputedLine } from "@/lib/tiling";
+import { imageNumberToIndex, moveSelectedBoxes, pasteBoxesAtPosition, selectBoxesCrossedByLine, serializeEditorLabels, type Point } from "@/lib/editor";
+import { parseYoloText, type YoloLine } from "@/lib/tiling";
 
 interface TileViewerProps {
   tiled: TiledData;
@@ -83,12 +83,6 @@ function getClassColor(cls: number): string {
   return CLASS_COLORS[cls % CLASS_COLORS.length];
 }
 
-function labelsToText(labels: YoloLine[]): string {
-  return labels
-    .map((l) => formatYoloLine(l as RecomputedLine))
-    .join("\n");
-}
-
 function isEditableElement(target: EventTarget | null): boolean {
   return target instanceof HTMLElement && (
     target.isContentEditable ||
@@ -136,6 +130,13 @@ export function TileViewer({ tiled, datasetType, objNamesText, onBack, onSave, o
   const [saveError, setSaveError] = useState("");
 
   const deleteDialogRef = useRef<HTMLDialogElement>(null);
+  const splitDialogRef = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const dialog = splitDialogRef.current;
+    if (!showSplitDialog || !dialog) return;
+    dialog.showModal();
+    return () => dialog.close();
+  }, [showSplitDialog]);
   useEffect(() => {
     const dialog = deleteDialogRef.current;
     if (!showDeleteDialog || !dialog) return;
@@ -236,13 +237,18 @@ export function TileViewer({ tiled, datasetType, objNamesText, onBack, onSave, o
   const image = entry?.image;
   const label = entry?.label;
   useEffect(() => {
-    if (!image || !label) return;
+    if (!image) return;
+    const url = URL.createObjectURL(image.blob);
+    setImageUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [image]);
+
+  useEffect(() => {
+    if (!label) return;
     let cancelled = false;
     setLabelsLoading(true);
     setLabels([]);
     setSavedLabels([]);
-    const url = URL.createObjectURL(image.blob);
-    setImageUrl(url);
     label.blob.text().then((text) => {
       if (cancelled) return;
       const parsed = parseYoloText(text);
@@ -268,7 +274,6 @@ export function TileViewer({ tiled, datasetType, objNamesText, onBack, onSave, o
     setIsMovingBox(false);
     return () => {
       cancelled = true;
-      URL.revokeObjectURL(url);
     };
   }, [image, label]);
 
@@ -752,7 +757,7 @@ export function TileViewer({ tiled, datasetType, objNamesText, onBack, onSave, o
     setSaving(true);
     setSaveError("");
     try {
-      await onSave(entry.split, entry.label.name, labelsToText(snapshot));
+      await onSave(entry.split, entry.label.name, serializeEditorLabels(snapshot, isProcessed));
       setSavedLabels(snapshot);
       setUndoSnapshot(null);
       setJustSaved(true);
@@ -764,7 +769,7 @@ export function TileViewer({ tiled, datasetType, objNamesText, onBack, onSave, o
     } finally {
       setSaving(false);
     }
-  }, [entry, onSave, labelsLoading, isMovingBox, isResizing, isDrawing, isLineDrawing, pendingDraw, saving, hasUnsavedChanges]);
+  }, [entry, onSave, isProcessed, labelsLoading, isMovingBox, isResizing, isDrawing, isLineDrawing, pendingDraw, saving, hasUnsavedChanges]);
 
   const confirmDraw = useCallback(
     (cls: number) => {
@@ -1019,7 +1024,7 @@ export function TileViewer({ tiled, datasetType, objNamesText, onBack, onSave, o
         <div className="flex items-center justify-between gap-3 flex-wrap px-4 py-2 border-b border-slate-100 bg-slate-50 text-xs text-slate-600">
           <span>Train: {tiled.trainImages.length} | Valid: {tiled.validImages.length} | Last Train Image: {[...entries].reverse().find(item => item.split === "train")?.image.name ?? "--"}</span>
           <button className="px-3 py-2 rounded-lg bg-slate-200 hover:bg-slate-300 disabled:opacity-40 font-medium"
-            disabled={saving || labelsLoading || showUnsavedDialog || Boolean(pendingDraw) || isMovingBox || isResizing || isDrawing || isLineDrawing}
+            disabled={saving || labelsLoading || showDeleteDialog || showSplitDialog || showUnsavedDialog || Boolean(pendingDraw) || isMovingBox || isResizing || isDrawing || isLineDrawing}
             onClick={() => { setSaveError(""); setShowSplitDialog(true); }}>
             Mark as Last Train Image
           </button>
@@ -1035,8 +1040,10 @@ export function TileViewer({ tiled, datasetType, objNamesText, onBack, onSave, o
 
         </div>
         {showSplitDialog && (
-          <div role="dialog" aria-modal="true" aria-label="Update Train/Valid split" className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-            <div className="bg-white rounded-2xl shadow-xl p-6 max-w-sm w-full mx-4 text-sm text-slate-700">
+          <dialog ref={splitDialogRef} aria-label="Update Train/Valid split"
+            onCancel={event => { event.preventDefault(); if (!saving) setShowSplitDialog(false); }}
+            className="fixed inset-0 z-50 m-auto bg-transparent p-0 max-w-sm w-11/12 backdrop:bg-black/50">
+            <div className="bg-white rounded-2xl shadow-xl p-6 w-full text-sm text-slate-700">
               <h3 className="font-bold mb-3">Set this image as the last Train image?</h3>
               <p>Train: {currentIndex + 1} images | Valid: {entries.length - currentIndex - 1} images</p>
               {hasUnsavedChanges && <p className="mt-2">Your unsaved annotations will be saved with this split update.</p>}
@@ -1048,7 +1055,7 @@ export function TileViewer({ tiled, datasetType, objNamesText, onBack, onSave, o
                   setSaveError("");
                   try {
                     await onUpdateSplit(currentIndex, hasUnsavedChanges ? {
-                      split: entry.split, name: entry.label.name, text: labelsToText(labelsRef.current),
+                      split: entry.split, name: entry.label.name, text: serializeEditorLabels(labelsRef.current, isProcessed),
                     } : undefined);
                     setSavedLabels(labelsRef.current);
                     setShowSplitDialog(false);
@@ -1058,7 +1065,7 @@ export function TileViewer({ tiled, datasetType, objNamesText, onBack, onSave, o
                 }}>{saving ? "Saving..." : "Update Split"}</button>
               </div>
             </div>
-          </div>
+          </dialog>
         )}
         {showDeleteDialog && (
           <dialog ref={deleteDialogRef} aria-label="Delete image and annotation"

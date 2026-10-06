@@ -7,15 +7,18 @@ import { SplitPicker, computeSplitData } from "@/components/SplitPicker";
 import { TileViewer } from "@/components/TileViewer";
 import { FinalizationSummary, FinalizedDownload } from "@/components/FinalizationSummary";
 import { deleteResolutionErrors, validateZipFiles, type ValidationDataset } from "@/lib/validation";
-import { loadProcessedDataset } from "@/lib/processed-dataset";
+import { loadProcessedDataset, validateProcessedDatasetDraft, type ProcessedValidationResult } from "@/lib/processed-dataset";
+import { repairProcessedBoundaryBoxes } from "@/lib/annotation-repair";
 import { deleteDatasetItem, updateDatasetSplit } from "@/lib/dataset-items";
 import { ZIP_VERSION } from "@/lib/finalization";
+import { resolveResumeStage } from "@/lib/session-stage";
 import { runTiling, type TilingProgress } from "@/lib/tiling-pipeline";
 import { DEFAULT_SMALL_BOX_THRESHOLD, DEFAULT_MIN_RETAINED_PERCENTAGE, sanitizeSmallBoxThreshold, sanitizeMinRetainedPercentage } from "@/lib/tiling-settings";
 import { DEFAULT_SLIVER_MIN_SIDE, DEFAULT_SLIVER_ASPECT_RATIO, sanitizeSliverValue } from "@/lib/tiling-settings";
 import {
   loadSession,
   saveSession,
+  saveProcessedDraft,
   saveSplit,
   saveTiled,
   saveFinalization,
@@ -32,6 +35,7 @@ import type {
   TiledData,
   TiledFile,
   FinalizationState,
+  ProcessedDatasetDraft,
 } from "@/lib/types";
 
 type AppState =
@@ -47,6 +51,7 @@ type AppState =
       stage: AppStage;
       issues: ValidationIssue[];
       dataset?: ValidationDataset;
+      processedDraft?: ProcessedDatasetDraft;
       session: ValidatedSession | null;
       split: SplitData | null;
       tiled: TiledData | null;
@@ -56,12 +61,24 @@ type AppState =
     }
   | { mode: "error"; message: string };
 
+async function commitProcessedValidation(result: ProcessedValidationResult): Promise<AppState> {
+  const ready = Boolean(result.session && result.tiled);
+  const stage = ready ? "tile-viewer" : "validation-results";
+  if (result.draft) await saveProcessedDraft(result.draft);
+  else await saveSession({ id: "current", stage, updatedAt: Date.now() }, result.session, null, result.tiled);
+  return { mode: "main", stage, issues: result.issues, processedDraft: result.draft,
+    session: result.session, tiled: result.tiled, split: null,
+    tilingProgress: null, finalization: null, finalZip: null };
+}
+
 export default function App() {
   const [state, setState] = useState<AppState>({ mode: "checking" });
   const deletingRef = useRef(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isValidating, setIsValidating] = useState(false);
   const [actionError, setActionError] = useState("");
+  const repairingRef = useRef(false);
+  const [isRepairing, setIsRepairing] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -69,9 +86,17 @@ export default function App() {
       try {
         const record = await loadSession();
         if (cancelled) return;
+        if (record?.processedDraft) {
+          const result = await validateProcessedDatasetDraft(record.processedDraft);
+          const resumed = await commitProcessedValidation(result);
+          if (!cancelled) setState(resumed);
+          return;
+        }
         if (record && record.session) {
-          const stage = record.meta.stage;
-          if (stage === "finalized") {
+          const stage = resolveResumeStage(record.session, record.meta.stage,
+            Boolean(record.finalization && record.finalization.zipVersion !== ZIP_VERSION)
+              || (record.meta.stage === "finalized" && !record.finalZip));
+          if (record.meta.stage === "finalized") {
             const fin = record.finalization;
             const zipStale = !fin || fin.zipVersion !== ZIP_VERSION || !record.finalZip;
             if (zipStale) {
@@ -135,14 +160,7 @@ export default function App() {
     try {
       if (!file2) {
         const result = await loadProcessedDataset(file1);
-        if (result.session && result.tiled) {
-          await saveSession({ id: "current", stage: "tile-viewer", updatedAt: Date.now() }, result.session, null, result.tiled);
-          setState({ mode: "main", stage: "tile-viewer", issues: [], session: result.session,
-            split: null, tiled: result.tiled, tilingProgress: null, finalization: null, finalZip: null });
-        } else {
-          setState({ mode: "main", stage: "validation-results", issues: result.issues,
-            session: null, split: null, tiled: null, tilingProgress: null, finalization: null, finalZip: null });
-        }
+        setState(await commitProcessedValidation(result));
         return;
       }
       const result = await validateZipFiles(file1, file2);
@@ -187,6 +205,23 @@ export default function App() {
     }
   }, []);
 
+  const handleFixBoundaryBoxes = useCallback(async (targets: ValidationIssue[]) => {
+    if (repairingRef.current || state.mode !== "main" || state.stage !== "validation-results" || !state.processedDraft) return;
+    repairingRef.current = true;
+    setIsRepairing(true);
+    setActionError("");
+    try {
+      const result = await repairProcessedBoundaryBoxes(state.processedDraft, targets);
+      // Commit real label blobs and revalidated issues together; failed storage keeps the old UI.
+      setState(await commitProcessedValidation(result));
+    } catch (error) {
+      setActionError(`Repair failed. No annotations were changed. ${error instanceof Error ? error.message : "Please try again."}`);
+    } finally {
+      repairingRef.current = false;
+      setIsRepairing(false);
+    }
+  }, [state]);
+
   const handleDeleteResolutionErrors = useCallback(async (filenames: string[]) => {
     if (deletingRef.current || state.mode !== "main" || state.stage !== "validation-results") return;
     deletingRef.current = true;
@@ -222,9 +257,7 @@ export default function App() {
       if (record && record.session) {
         const fin = record.finalization;
         const zipStale = Boolean(fin && fin.zipVersion !== ZIP_VERSION) || (record.meta.stage === "finalized" && !record.finalZip);
-        const stage = record.meta.stage === "tiling" ? "split-picker"
-          : record.meta.stage === "finalizing" ? "finalization-summary"
-            : record.meta.stage === "finalized" && zipStale ? "finalization-summary" : record.meta.stage;
+        const stage = resolveResumeStage(record.session, record.meta.stage, zipStale);
         if (stage !== record.meta.stage) await updateSessionStage(stage);
         setState({
           mode: "main",
@@ -576,8 +609,10 @@ export default function App() {
             issues={issues}
             onDeleteResolutionErrors={handleDeleteResolutionErrors}
             isDeleting={isDeleting}
-            imageCount={state.dataset?.images.length}
-            annotationCount={state.dataset?.annotations.length}
+            onFixBoundaryBoxes={state.processedDraft ? handleFixBoundaryBoxes : undefined}
+            isRepairing={isRepairing}
+            imageCount={state.processedDraft?.session.totalImages ?? state.dataset?.images.length}
+            annotationCount={state.processedDraft?.session.totalAnnotations ?? state.dataset?.annotations.length}
             onSuccess={handleReset}
             onReset={handleReset}
           />

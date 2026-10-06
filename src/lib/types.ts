@@ -8,11 +8,16 @@ export type ValidationIssueType =
   | "invalid-annotation"
   | "zip-structure";
 
+export type ValidationIssueCode = "box-out-of-bounds" | "invalid-class" | "malformed-yolo" | "invalid-dimensions";
+
 export interface ValidationIssue {
   type: ValidationIssueType;
   filename: string;
   reason: string;
   detail?: string;
+  code?: ValidationIssueCode;
+  lineNumber?: number;
+  split?: "train" | "valid";
 }
 
 export interface ImageFile {
@@ -47,6 +52,12 @@ export interface ValidatedSession {
   totalImages: number;
   totalAnnotations: number;
   validatedAt: number;
+}
+
+/** Structurally valid processed data awaiting annotation validation/repair. */
+export interface ProcessedDatasetDraft {
+  session: ValidatedSession;
+  tiled: TiledData;
 }
 
 export interface SplitFile {

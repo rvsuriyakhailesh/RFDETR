@@ -1,5 +1,5 @@
 import JSZip from "jszip";
-import type { DatasetType, TiledData, ValidationIssue, ValidatedSession } from "./types";
+import type { DatasetType, ProcessedDatasetDraft, TiledData, ValidationIssue, ValidatedSession } from "./types";
 import { getImageDimensions } from "./validation";
 import { validateYoloText } from "./tiling";
 import { orderedDatasetItems } from "./dataset-items";
@@ -32,9 +32,14 @@ function checkArchivePaths(buffer: ArrayBuffer): void {
   while (end >= earliest && (view.getUint32(end, true) !== 0x06054b50
     || end + 22 + view.getUint16(end + 20, true) !== view.byteLength)) end--;
   if (end < earliest) throw new Error("Could not read ZIP directory. The archive may be corrupted.");
+  if (view.getUint16(end + 4, true) !== 0 || view.getUint16(end + 6, true) !== 0
+    || view.getUint16(end + 8, true) !== view.getUint16(end + 10, true)) {
+    throw new Error("Multi-part ZIP archives are not supported. Upload a complete downloaded RFDETR ZIP.");
+  }
   const count = view.getUint16(end + 10, true);
   let offset = view.getUint32(end + 16, true);
   if (count === 65535 || offset === 0xffffffff) throw new Error("ZIP64 archives are not supported by this importer.");
+  if (offset + view.getUint32(end + 12, true) !== end) throw new Error("Corrupt ZIP directory size.");
   const seen = new Set<string>();
   const decoder = new TextDecoder();
   for (let i = 0; i < count; i++) {
@@ -50,13 +55,40 @@ function checkArchivePaths(buffer: ArrayBuffer): void {
     seen.add(path);
     offset = next;
   }
+  if (offset !== end) throw new Error("Corrupt ZIP directory entry count.");
 }
 
-export async function loadProcessedDataset(file: Blob): Promise<{
+export interface ProcessedValidationResult {
   issues: ValidationIssue[];
   session: ValidatedSession | null;
   tiled: TiledData | null;
-}> {
+  draft?: ProcessedDatasetDraft;
+}
+
+/** Revalidate current annotation blobs; only a clean draft becomes an editor session. */
+export async function validateProcessedDatasetDraft(draft: ProcessedDatasetDraft): Promise<ProcessedValidationResult> {
+  const issues: ValidationIssue[] = [];
+  const root = `RFDETR_${draft.session.zipBaseName}`;
+  const text = draft.session.objNames?.text ?? "";
+  const classCount = text.trim() ? text.trim().split(/\r?\n/).length : 0;
+  for (const split of ["train", "valid"] as const) {
+    for (const label of draft.tiled[split === "train" ? "trainLabels" : "validLabels"]) {
+      try {
+        for (const issue of validateYoloText(await label.blob.text(), classCount)) {
+          issues.push({ type: "invalid-annotation", filename: `${root}/${split}/labels/${label.name}`,
+            ...issue, split, reason: `Line ${issue.lineNumber}: ${issue.reason}` });
+        }
+      } catch {
+        issues.push({ type: "invalid-annotation", filename: `${root}/${split}/labels/${label.name}`,
+          split, reason: "Could not read annotation file." });
+      }
+    }
+  }
+  return issues.length ? { issues, session: null, tiled: null, draft }
+    : { issues, session: draft.session, tiled: draft.tiled };
+}
+
+export async function loadProcessedDataset(file: Blob): Promise<ProcessedValidationResult> {
   const issues: ValidationIssue[] = [];
   const fail = (filename: string, reason: string, type: ValidationIssue["type"] = "zip-structure") => {
     issues.push({ filename, reason, type });
@@ -88,7 +120,13 @@ export async function loadProcessedDataset(file: Blob): Promise<{
       : "Expected one RFDETR_<name> root with its class names file and train/valid images and labels folders.");
     return { issues, session: null, tiled: null };
   }
-  const namesText = await zip.file(`${root}/${root}_obj.names`)!.async("string");
+  let namesText: string;
+  try {
+    namesText = await zip.file(`${root}/${root}_obj.names`)!.async("string");
+  } catch {
+    fail(`${root}_obj.names`, "Could not read the processed RFDETR class names file.");
+    return { issues, session: null, tiled: null };
+  }
   const classCount = namesText.trim() ? namesText.trim().split(/\r?\n/).length : 0;
   if (!classCount) fail(`${root}_obj.names`, "Class names must define at least one class.", "invalid-annotation");
   const tiled: TiledData = {
@@ -124,10 +162,7 @@ export async function loadProcessedDataset(file: Blob): Promise<{
         const dimensions = await getImageDimensions(blob);
         if (dimensions.width <= 0 || dimensions.height <= 0) throw new Error("Image has no readable pixels.");
         const labelBlob = await zip.files[labelPath].async("blob");
-        const text = await labelBlob.text();
-        for (const issue of validateYoloText(text, classCount)) {
-          fail(labelPath, `Line ${issue.lineNumber}: ${issue.reason}`, "invalid-annotation");
-        }
+        // Annotation blobs are read once during draft validation below.
         tiled[split === "train" ? "trainImages" : "validImages"].push({ name, blob });
         tiled[split === "train" ? "trainLabels" : "validLabels"].push({ name: `${base}.txt`, blob: labelBlob });
       } catch (error) {
@@ -137,14 +172,16 @@ export async function loadProcessedDataset(file: Blob): Promise<{
     for (const path of labelPaths) fail(path, "No matching image in the same partition.", "orphaned-annotation");
   }
   if (!tiled.trainImages.length) fail("train/images", "At least one Train image is required.");
-  if (issues.length) return { issues, session: null, tiled: null };
   const count = orderedDatasetItems(tiled).length;
-  return {
-    issues, tiled,
+  const annotationResult = await validateProcessedDatasetDraft({
+    tiled,
     session: {
       datasetType: "processed-rfdetr", zipBaseName: root.slice("RFDETR_".length),
       objNames: { name: `${root}_obj.names`, text: namesText }, pairs: [],
       totalImages: count, totalAnnotations: count, validatedAt: Date.now(),
     },
-  };
+  });
+  // Report annotation problems too, but never retain an incomplete/conflicting dataset.
+  return issues.length ? { issues: [...issues, ...annotationResult.issues], session: null, tiled: null }
+    : annotationResult;
 }

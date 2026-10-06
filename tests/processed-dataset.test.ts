@@ -3,6 +3,8 @@ import JSZip from "jszip";
 import { buildFinalZip } from "../src/lib/finalization";
 import { detectDatasetType, loadProcessedDataset } from "../src/lib/processed-dataset";
 import { orderedDatasetItems, updateDatasetSplit } from "../src/lib/dataset-items";
+import { moveSelectedBoxes, serializeEditorLabels } from "../src/lib/editor";
+import { parseYoloText } from "../src/lib/tiling";
 import type { TiledData } from "../src/lib/types";
 
 beforeEach(() => {
@@ -51,6 +53,18 @@ describe("processed dataset detection", () => {
 });
 
 describe("processed validation", () => {
+  it("rejects a truncated central-directory count and unsafe paths", async () => {
+    const zip = new JSZip();
+    zip.file("../escape.txt", "unsafe");
+    expect((await loadProcessedDataset(await zip.generateAsync({ type: "blob" }))).issues[0].reason).toContain("Unsafe or conflicting");
+    const bytes = new Uint8Array(await (await exportDataset(dataset(3, 2))).arrayBuffer());
+    const view = new DataView(bytes.buffer);
+    const end = bytes.length - 22;
+    const count = view.getUint16(end + 10, true);
+    view.setUint16(end + 8, count - 1, true);
+    view.setUint16(end + 10, count - 1, true);
+    expect((await loadProcessedDataset(new Blob([bytes]))).issues[0].reason).toContain("entry count");
+  });
   it("reports missing pairs and malformed annotations with line numbers", async () => {
     const broken = await rewriteZip(zip => {
       zip.remove("RFDETR_seats/train/labels/seats_1.txt");
@@ -94,6 +108,32 @@ describe("processed validation", () => {
 });
 
 describe("round-trip and editor split integrity", () => {
+  it("preserves noncontiguous existing assignments until the user sets a boundary", async () => {
+    const original = { ...dataset(4, 2), preserveFilenames: true };
+    [original.trainImages[1], original.validImages[1]] = [original.validImages[1], original.trainImages[1]];
+    [original.trainLabels[1], original.validLabels[1]] = [original.validLabels[1], original.trainLabels[1]];
+    const result = await loadProcessedDataset(await exportDataset(original));
+    expect(result.issues).toEqual([]);
+    expect(orderedDatasetItems(result.tiled!).map(item => [item.image.name, item.split])).toEqual([
+      ["1.jpg", "train"], ["2.jpg", "valid"], ["3.jpg", "valid"], ["4.jpg", "train"],
+    ]);
+  });
+  it("round-trips an edited box and dirty split save without rounding untouched boxes", async () => {
+    let tiled = { ...dataset(3, 2), preserveFilenames: true };
+    const original = parseYoloText("0 0.3333333333333333 0.5 0.1234567890123456 0.2\n1 0.7 0.6 0.1 0.1");
+    const edited = moveSelectedBoxes(original, new Set([1]), 1 / 1440, 0);
+    tiled.trainLabels[0] = { ...tiled.trainLabels[0], blob: new Blob([serializeEditorLabels(edited, true)]) };
+    tiled = updateDatasetSplit(tiled, 0) as typeof tiled;
+    for (let cycle = 0; cycle < 3; cycle++) {
+      const result = await loadProcessedDataset(await exportDataset(tiled));
+      expect(result.issues).toEqual([]);
+      tiled = result.tiled! as typeof tiled;
+      expect(parseYoloText(await tiled.trainLabels[0].blob.text())).toEqual(edited);
+      expect(parseYoloText(await tiled.trainLabels[0].blob.text())[0]).toEqual(original[0]);
+      expect(tiled.trainImages).toHaveLength(1);
+      expect(tiled.validImages).toHaveLength(2);
+    }
+  });
   it("moves 150/44 to 160/34 and backward to 120/74 without recreating images or annotations", async () => {
     const loaded = await loadProcessedDataset(await exportDataset(dataset()));
     expect(loaded.issues).toEqual([]);

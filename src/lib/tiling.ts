@@ -1,4 +1,5 @@
 import { sanitizeSmallBoxThreshold, sanitizeMinRetainedPercentage, sanitizeSliverValue } from "./tiling-settings";
+import type { ValidationIssueCode } from "./types";
 
 export interface SliverFilterOptions {
   sliverMinSide?: number;
@@ -44,30 +45,30 @@ export const TILE_SUFFIXES = ["_1", "_2"];
 const DECIMAL = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i;
 const BOUNDARY_ROUNDOFF = 0.000001;
 
-function parseYoloLineDetailed(line: string, classCount?: number, requireBounds = false): { value: YoloLine | null; reason: string | null } {
+function parseYoloLineDetailed(line: string, classCount?: number, requireBounds = false): { value: YoloLine | null; reason: string | null; code?: ValidationIssueCode } {
   const parts = line.trim().split(/\s+/);
-  if (parts.length !== 5) return { value: null, reason: "Expected exactly five fields: class, x center, y center, width, height." };
+  if (parts.length !== 5) return { value: null, code: "malformed-yolo", reason: "Expected exactly five fields: class, x center, y center, width, height." };
   if (!/^\d+$/.test(parts[0]) || !Number.isSafeInteger(Number(parts[0]))) {
-    return { value: null, reason: "Class ID must be a nonnegative integer." };
+    return { value: null, code: "invalid-class", reason: "Class ID must be a nonnegative integer." };
   }
   const cls = Number(parts[0]);
   if (classCount !== undefined && cls >= classCount) {
-    return { value: null, reason: `Class ID ${cls} is outside obj.names (0-${classCount - 1}).` };
+    return { value: null, code: "invalid-class", reason: `Class ID ${cls} is outside obj.names (0-${classCount - 1}).` };
   }
   if (parts.slice(1).some((part) => !DECIMAL.test(part))) {
-    return { value: null, reason: "Coordinates and dimensions must be valid numbers." };
+    return { value: null, code: "malformed-yolo", reason: "Coordinates and dimensions must be valid numbers." };
   }
   const [xCenter, yCenter, width, height] = parts.slice(1).map(Number);
   if (![xCenter, yCenter, width, height].every(Number.isFinite)) {
-    return { value: null, reason: "Coordinates and dimensions must be finite." };
+    return { value: null, code: "malformed-yolo", reason: "Coordinates and dimensions must be finite." };
   }
   if (width <= 0 || height <= 0 || width > 1 || height > 1) {
-    return { value: null, reason: "Width and height must be greater than zero and at most one." };
+    return { value: null, code: "invalid-dimensions", reason: "Width and height must be greater than zero and at most one." };
   }
   if (requireBounds && (xCenter < 0 || xCenter > 1 || yCenter < 0 || yCenter > 1 ||
       xCenter - width / 2 < -BOUNDARY_ROUNDOFF || xCenter + width / 2 > 1 + BOUNDARY_ROUNDOFF ||
       yCenter - height / 2 < -BOUNDARY_ROUNDOFF || yCenter + height / 2 > 1 + BOUNDARY_ROUNDOFF)) {
-    return { value: null, reason: "Bounding box extends outside normalized image coordinates." };
+    return { value: null, code: "box-out-of-bounds", reason: "Bounding box extends outside normalized image coordinates." };
   }
   return { value: { cls, xCenter, yCenter, width, height }, reason: null };
 }
@@ -76,12 +77,12 @@ export function parseYoloLine(line: string): YoloLine | null {
   return parseYoloLineDetailed(line).value;
 }
 
-export function validateYoloText(text: string, classCount?: number): { lineNumber: number; reason: string }[] {
-  const issues: { lineNumber: number; reason: string }[] = [];
+export function validateYoloText(text: string, classCount?: number): { lineNumber: number; reason: string; code: ValidationIssueCode }[] {
+  const issues: { lineNumber: number; reason: string; code: ValidationIssueCode }[] = [];
   text.split(/\r?\n/).forEach((raw, index) => {
     if (!raw.trim()) return;
-    const { reason } = parseYoloLineDetailed(raw, classCount, true);
-    if (reason) issues.push({ lineNumber: index + 1, reason });
+    const { reason, code } = parseYoloLineDetailed(raw, classCount, true);
+    if (reason && code) issues.push({ lineNumber: index + 1, reason, code });
   });
   return issues;
 }
@@ -99,6 +100,24 @@ export function parseYoloText(text: string): YoloLine[] {
 
 export function formatYoloLine(line: RecomputedLine): string {
   return `${line.cls} ${line.xCenter.toFixed(6)} ${line.yCenter.toFixed(6)} ${line.width.toFixed(6)} ${line.height.toFixed(6)}`;
+}
+
+/** Clip edges, never clamp YOLO fields independently. Invalid input is not repairable. */
+export function clipYoloBoxToImageBounds(box: YoloLine): YoloLine | null {
+  if (!Number.isSafeInteger(box.cls) || box.cls < 0
+    || ![box.xCenter, box.yCenter, box.width, box.height].every(Number.isFinite)
+    || box.width <= 0 || box.height <= 0 || box.width > 1 || box.height > 1) {
+    throw new Error("Only finite boxes with valid classes and dimensions can be clipped.");
+  }
+  const left = box.xCenter - box.width / 2, right = box.xCenter + box.width / 2;
+  const top = box.yCenter - box.height / 2, bottom = box.yCenter + box.height / 2;
+  if (left >= 0 && right <= 1 && top >= 0 && bottom <= 1) return box;
+  const clippedLeft = Math.max(0, left), clippedRight = Math.min(1, right);
+  const clippedTop = Math.max(0, top), clippedBottom = Math.min(1, bottom);
+  if (clippedRight <= clippedLeft || clippedBottom <= clippedTop) return null;
+  return { cls: box.cls, xCenter: (clippedLeft + clippedRight) / 2,
+    yCenter: (clippedTop + clippedBottom) / 2,
+    width: clippedRight - clippedLeft, height: clippedBottom - clippedTop };
 }
 
 export function recomputeAnnotationForTile(

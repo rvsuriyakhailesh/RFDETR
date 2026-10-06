@@ -65,8 +65,10 @@ async function clickSelector(selector) {
 }
 async function key(key, modifiers = 0) {
   const code = key.length === 1 ? `Key${key.toUpperCase()}` : key;
-  await cdp('Input.dispatchKeyEvent', { type: 'keyDown', key, code, modifiers });
-  await cdp('Input.dispatchKeyEvent', { type: 'keyUp', key, code, modifiers });
+  // Chromium needs the native key code to execute Tab/Escape default actions.
+  const windowsVirtualKeyCode = { Tab: 9, Escape: 27 }[key];
+  await cdp('Input.dispatchKeyEvent', { type: 'keyDown', key, code, modifiers, ...(windowsVirtualKeyCode ? { windowsVirtualKeyCode } : {}) });
+  await cdp('Input.dispatchKeyEvent', { type: 'keyUp', key, code, modifiers, ...(windowsVirtualKeyCode ? { windowsVirtualKeyCode } : {}) });
   await delay(80);
 }
 async function mouse(x, y, type, extra = {}) {
@@ -347,7 +349,7 @@ try {
     const { buildFinalZip } = await import('/src/lib/finalization.ts');
     const pixels = new Blob([Uint8Array.from(atob(${JSON.stringify(pngs.bad)}), c => c.charCodeAt(0))], { type: 'image/png' });
     const imageFiles = Array.from({length:194}, (_, i) => ({name:(i+1)+'.png', blob:pixels}));
-    const labelBlob = new Blob(['0 0.5 0.5 0.2 0.2\\n1 0.8 0.8 0.1 0.1']);
+    const labelBlob = new Blob(['0 0.5 0.5 0.2 0.2\\n1 0.8000000001234567 0.8 0.1234567890123456 0.1']);
     const labelFiles = imageFiles.map(file => ({name:file.name.replace('.png','.txt'), blob:labelBlob}));
     const zip = await buildFinalZip({trainImages:imageFiles.slice(0,150), trainLabels:labelFiles.slice(0,150),
       validImages:imageFiles.slice(150), validLabels:labelFiles.slice(150), tiledAt:Date.now()}, 'Man\\nChair', 'roundtrip');
@@ -386,6 +388,13 @@ try {
   await clickText('Mancls 0'); await waitText('3 annotations'); await key('d');
   // Dirty edits and split update commit together, including on storage failure.
   await clickText('Mark as Last Train Image'); await waitText('Your unsaved annotations will be saved');
+  assert.equal(await evaluate(`document.querySelector('dialog[aria-label="Update Train/Valid split"]').open`), true);
+  await key('Tab');
+  assert.equal(await evaluate(`Boolean(document.activeElement.closest('dialog[aria-label="Update Train/Valid split"]'))`), true);
+  await key('Escape');
+  assert.equal(await evaluate(`Boolean(document.querySelector('dialog[aria-label="Update Train/Valid split"]'))`), false);
+  assert((await body()).includes('Unsaved'));
+  await clickText('Mark as Last Train Image');
   await key('d', 2); assert((await body()).includes('3 annotations'));
   await clickText('Cancel'); assert((await body()).includes('Unsaved'));
   await clickText('Mark as Last Train Image');
@@ -396,6 +405,7 @@ try {
   await evaluate(`(async () => { const { db } = await import('/src/lib/db.ts'); db.sessions.put = window.originalPut; })()`);
   await clickText('Update Split'); await waitText('Train: 1 | Valid: 193');
   assert.equal(await savedRecord("(await record.tiled.trainLabels[0].blob.text()).split('\\n').length"), 3);
+  assert.equal(await savedRecord("(await record.tiled.trainLabels[0].blob.text()).split('\\n')[1]"), '1 0.8000000001234567 0.8 0.1234567890123456 0.1');
   async function jump(number) {
     await evaluate(`(() => { const input = document.querySelector('#editor-image-number');
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, ${JSON.stringify(String(number))});
@@ -555,6 +565,103 @@ try {
   assert.equal(await evaluate(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Delete Image').disabled`),true);
   assert.equal(browserErrors.length,0,JSON.stringify(browserErrors));
   console.log('PASS final Train/image protection and safe missing-annotation deletion; no browser runtime exceptions');
+
+  // Processed resume must never fall back to raw split/tiling stages.
+  await evaluate(`(async () => { const { updateSessionStage } = await import('/src/lib/db.ts'); await updateSessionStage('tiling'); })()`);
+  await cdp('Page.reload'); await waitText('Resume Session'); await clickText('Resume Session');
+  await waitText('Annotation Editor'); await waitText('Train: 1 | Valid: 0');
+  assert(!(await body()).includes('Choose Train/Valid Split'));
+  assert.equal(await savedRecord('record.meta.stage'), 'tile-viewer');
+
+  // A failed import replaces the old saved project just as raw validation does.
+  await clickText('Back'); await waitText('Upload your zip files');
+  const incomplete = await JSZip.loadAsync(Buffer.from(reopenedExport, 'base64'));
+  incomplete.remove('RFDETR_roundtrip/train/labels');
+  const incompleteBase64 = await incomplete.generateAsync({ type: 'base64' });
+  await evaluate(`(() => {
+    const dt = new DataTransfer();
+    dt.items.add(new File([Uint8Array.from(atob(${JSON.stringify(incompleteBase64)}), c => c.charCodeAt(0))], 'broken.zip'));
+    const input = document.querySelector('input[type=file]'); input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await clickText('Validate Files'); await waitText('train labels folder is missing');
+  assert.equal(await savedRecord('record.session'), null);
+  assert.equal(await savedRecord('record.finalZip'), null);
+  await cdp('Page.reload'); await waitText('Upload your zip files');
+  assert(!(await body()).includes('Resume Session'));
+  assert.equal(browserErrors.length,0,JSON.stringify(browserErrors));
+  console.log('PASS precision-preserving dirty save, native split confirmation/Escape, processed resume stage recovery and failed-import stale-session cleanup');
+
+  // Repair actual processed labels from the validation screen, including persistence failures.
+  const repairZip = await JSZip.loadAsync(Buffer.from(reopenedExport, 'base64'));
+  const repairLabelPath = 'RFDETR_roundtrip/train/labels/roundtrip_1.txt';
+  const overflowBox = '0 0.980000 0.500000 0.100000 0.200000';
+  const invisibleBox = '0 2 0.5 0.1 0.2';
+  const untouchedBox = '1 0.3333333333333333 0.5 0.1234567890123456 0.2';
+  repairZip.file(repairLabelPath, [untouchedBox, invisibleBox, ...Array(5).fill(overflowBox)].join('\r\n'));
+  async function uploadForRepair(zip) {
+    const base64 = await zip.generateAsync({ type: 'base64' });
+    await evaluate(`(() => {
+      const dt = new DataTransfer();
+      dt.items.add(new File([Uint8Array.from(atob(${JSON.stringify(base64)}), c => c.charCodeAt(0))], 'boundary-repair.zip'));
+      const input = document.querySelector('input[type=file]'); input.files = dt.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await clickText('Validate Files');
+  }
+  await uploadForRepair(repairZip); await waitText('Fix All 6 Boundary Boxes');
+  assert.equal(await savedRecord('record.session'), null);
+  assert.equal(await savedRecord('record.processedDraft.tiled.trainImages.length'), 120);
+  await evaluate(`(async () => { const { db } = await import('/src/lib/db.ts'); window.originalPut = db.sessions.put; db.sessions.put = async () => { throw new Error('Test repair save failure'); }; })()`);
+  await clickText('Fix Box'); await waitText('Test repair save failure');
+  assert((await body()).includes('Fix All 6 Boundary Boxes'));
+  assert((await savedRecord('await record.processedDraft.tiled.trainLabels[0].blob.text()')).includes(invisibleBox));
+  await evaluate(`(async () => { const { db } = await import('/src/lib/db.ts'); db.sessions.put = window.originalPut; })()`);
+  await clickText('Fix Box'); await waitText('Fix All 5 Boundary Boxes');
+  const partiallyFixed = await savedRecord('await record.processedDraft.tiled.trainLabels[0].blob.text()');
+  assert(!partiallyFixed.includes(invisibleBox));
+  assert.equal(partiallyFixed.split('\r\n').length, 6);
+  await cdp('Page.reload'); await waitText('Fix All 5 Boundary Boxes');
+  await clickText('Fix All 5 Boundary Boxes'); await waitText('Annotation Editor');
+  await waitText('Train: 120 | Valid: 74'); await waitText('6 annotations');
+  const repairedText = await savedRecord('await record.tiled.trainLabels[0].blob.text()');
+  assert.equal(repairedText.split('\r\n')[0], untouchedBox);
+  assert.equal(repairedText.split('\r\n')[1], '0 0.965000 0.500000 0.070000 0.200000');
+  assert.equal(await savedRecord('Boolean(record.processedDraft)'), false);
+  assert.equal(await savedRecord('record.finalZip'), null);
+  assert.equal(await savedRecord('record.split'), null);
+  assert(!(await body()).includes('Choose Train/Valid Split'));
+  await cdp('Page.reload'); await waitText('Resume Session'); await clickText('Resume Session');
+  await waitText('6 annotations');
+  assert.equal(await savedRecord('await record.tiled.trainLabels[0].blob.text()'), repairedText);
+  await clickText('Finalize'); await waitText('Finalization Summary'); await clickText('Build zip');
+  await waitText('Download RFDETR_roundtrip.zip');
+  const repairedExport = await savedRecord(`await new Promise(resolve => { const r = new FileReader(); r.onload = () => resolve(r.result.split(',')[1]); r.readAsDataURL(record.finalZip); })`);
+  const repairedArchive = await JSZip.loadAsync(Buffer.from(repairedExport, 'base64'));
+  assert.equal(await repairedArchive.file(repairLabelPath).async('string'), repairedText);
+  for (const original of Object.values(repairZip.files).filter(file => !file.dir && file.name.includes('/images/'))) {
+    assert.deepEqual(await repairedArchive.file(original.name).async('uint8array'), await original.async('uint8array'));
+  }
+  await evaluate(`(async () => { const { clearSession } = await import('/src/lib/db.ts'); await clearSession(); })()`);
+  await cdp('Page.reload'); await waitText('Upload your zip files'); await uploadOne(repairedExport);
+  await waitText('6 annotations');
+  assert.equal(await savedRecord('await record.tiled.trainLabels[0].blob.text()'), repairedText);
+  console.log('PASS repair failure/retry, six-to-five individual repair, partial-draft reload, Fix All direct editor, fixed-value resume/export/re-upload and all image bytes unchanged');
+
+  // Mixed errors: boundaries are repaired, the invalid class remains blocking.
+  await clickText('Back'); await waitText('Upload your zip files');
+  const invalidClassBox = '99 0.5 0.5 0.1 0.1';
+  repairZip.file(repairLabelPath, [...Array(5).fill(overflowBox), invalidClassBox].join('\n'));
+  await uploadForRepair(repairZip); await waitText('Fix All 5 Boundary Boxes');
+  await clickText('Fix All 5 Boundary Boxes'); await waitText('Validation found 1 issue');
+  assert((await body()).includes('Class ID 99'));
+  assert(!(await body()).includes('Annotation Editor'));
+  assert(!(await body()).includes('Fix Box'));
+  assert.equal(await savedRecord('record.session'), null);
+  assert.equal(await savedRecord('record.tiled'), null);
+  assert.equal((await savedRecord('await record.processedDraft.tiled.trainLabels[0].blob.text()')).split('\n')[5], invalidClassBox);
+  assert.equal(browserErrors.length,0,JSON.stringify(browserErrors));
+  console.log('PASS mixed annotation errors repair only boundaries and retain blocking invalid-class validation');
 
 
 } catch (error) {

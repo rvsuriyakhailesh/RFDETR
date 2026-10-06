@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { imageNumberToIndex, moveSelectedBoxes } from "../src/lib/editor";
+import { imageNumberToIndex, moveSelectedBoxes, serializeEditorLabels } from "../src/lib/editor";
 import { formatYoloLine, parseYoloText, type YoloLine } from "../src/lib/tiling";
 
 describe("image-number navigation", () => {
@@ -21,6 +21,23 @@ const boxes: YoloLine[] = [
   { cls: 1, xCenter: 0.7, yCenter: 0.6, width: 0.4, height: 0.2 },
   { cls: 2, xCenter: 0.5, yCenter: 0.5, width: 0.1, height: 0.1 },
 ];
+
+describe("editor annotation serialization", () => {
+  it("retains untouched coordinates when saving an edited processed annotation", () => {
+    const original = parseYoloText("0 0.3333333333333333 0.5 0.1234567890123456 0.2\n1 0.7 0.6 0.1 0.1");
+    const edited = moveSelectedBoxes(original, new Set([1]), 1 / 1440, 0);
+    const reopened = parseYoloText(serializeEditorLabels(edited, true));
+    expect(reopened).toEqual(edited);
+    expect(reopened[0]).toEqual(original[0]);
+    let current = reopened;
+    for (let i = 0; i < 5; i++) current = parseYoloText(serializeEditorLabels(current, true));
+    expect(current).toEqual(edited);
+  });
+  it("keeps the existing six-decimal raw editor format", () => {
+    expect(serializeEditorLabels(boxes)).toBe(boxes.map(formatYoloLine).join("\n"));
+    expect(serializeEditorLabels([], true)).toBe("");
+  });
+});
 
 describe("box movement", () => {
   it("moves one box without changing its size, class, or other boxes", () => {
